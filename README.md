@@ -4,13 +4,13 @@
 
 **Painel interativo de análise estatística do São Paulo Futebol Clube no Campeonato Brasileiro na era dos pontos corridos (2003–2025).**
 
-[![GitHub Pages](https://img.shields.io/badge/Deploy-GitHub%20Pages-111315?style=for-the-badge&logo=github)](https://yurialvvvss.github.io/SPFC-Analytics/)
+[![GitHub Pages](https://img.shields.io/badge/Deploy-GitHub%20Pages-111315?style=for-the-badge&logo=github)](https://dadostricolor.live/)
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Pandas](https://img.shields.io/badge/Pandas-ETL-150458?style=for-the-badge&logo=pandas&logoColor=white)](https://pandas.pydata.org/)
 [![Chart.js](https://img.shields.io/badge/Chart.js-4-D5001C?style=for-the-badge&logo=chartdotjs&logoColor=white)](https://www.chartjs.org/)
 [![Static Site](https://img.shields.io/badge/Arquitetura-100%25%20Est%C3%A1tica-D5001C?style=for-the-badge)](#arquitetura)
 
-[Acessar o painel (GitHub Pages)](https://yurialvvvss.github.io/SPFC-Analytics/) · [Funcionalidades](#funcionalidades) · [Pipeline ETL](#qualidade-de-dados-e-etl) · [Como executar](#como-executar-localmente)
+[Acessar o painel (GitHub Pages)](https://dadostricolor.live/) · [Funcionalidades](#funcionalidades) · [Pipeline ETL](#qualidade-de-dados-e-etl) · [Como executar](#como-executar-localmente)
 
 </div>
 
@@ -148,7 +148,7 @@ O script regenerará `docs/data/spfc_pontos_corridos.json` e exibirá no termina
 2. No repositório do GitHub, acesse **Settings → Pages**.
 3. Em **Build and deployment**, selecione **Source: Deploy from a branch**, escolha a branch **`main`** e a pasta **`/docs`**, e clique em **Save**.
 
-Em poucos instantes o painel estará online em `https://yurialvvvss.github.io/SPFC-Analytics/`.
+Em poucos instantes o painel estará online em `https://dadostricolor.live/`.
 
 ---
 
