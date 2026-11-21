@@ -222,7 +222,11 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Dados brutos do Kaggle (CSVs originais)
+# Dados brutos do Kaggle (CSVs originais e compactados)
 data/raw/*
 !data/raw/.gitkeep
+*.zip
+
+# Garante o versionamento da base histórica congelada (2003–2025)
+!data/historico_2003_2025.json
 

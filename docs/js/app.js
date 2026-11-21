@@ -7,6 +7,7 @@
   "use strict";
 
   const DATA_URL = "data/spfc_pontos_corridos.json";
+  const META_URL = "data/meta.json";
   const CLASSICOS = new Set(["Corinthians", "Palmeiras", "Santos"]);
   const TITULOS_SPFC = new Set([2006, 2007, 2008]);
 
@@ -36,16 +37,16 @@
     maximumFractionDigits: 2,
   });
 
-  // Estado global
+  // Estado global (limites de temporada calculados dinamicamente a partir dos dados)
   let allMatches = [];
   let datasetMeta = null;
   let minSeason = 2003;
-  let maxSeason = 2025;
+  let maxSeason = 2003;
   let modernStart = 2014;
 
   const state = {
     seasonStart: 2003,
-    seasonEnd: 2025,
+    seasonEnd: 2003,
     opponent: "ALL",
     venue: "ALL",
     evolutionMode: "performance", // "performance" | "goals"
@@ -70,7 +71,13 @@
 
   function cacheDom() {
     const ids = [
+      "brand-subtitle",
       "header-dataset-badge",
+      "header-updated-badge",
+      "header-updated-text",
+      "chip-period-all",
+      "chip-period-modern",
+      "chip-period-current",
       "filter-season-start",
       "filter-season-end",
       "filter-opponent",
@@ -119,6 +126,7 @@
       "venue-away-games",
       "venue-away-stats",
       "scorers-subtitle",
+      "scorers-coverage-badge",
       "chart-scorers",
       "empty-scorers",
       "empty-scorers-text",
@@ -137,6 +145,10 @@
       "btn-prev-page",
       "btn-next-page",
       "page-indicator",
+      "footer-range-all",
+      "footer-games-all",
+      "footer-range-modern",
+      "footer-games-modern",
       "footer-updated-at",
     ];
     for (const id of ids) {
@@ -239,7 +251,7 @@
       ga += m.gols_contra;
       if (m.gols_contra === 0) cleanSheets += 1;
 
-      // Garantia 1: contabiliza apenas jogos com dados disciplinares registrados (2014–2025)
+      // Garantia 1: contabiliza apenas jogos com dados disciplinares registrados (2014 em diante)
       if (m.cartoes_amarelos !== null && m.cartoes_vermelhos !== null) {
         cardGames += 1;
         yellowTotal += m.cartoes_amarelos;
@@ -324,8 +336,8 @@
       if (p === "ALL") active = state.seasonStart === minSeason && state.seasonEnd === maxSeason;
       else if (p === "TRI") active = state.seasonStart === 2006 && state.seasonEnd === 2008;
       else if (p === "MODERN") active = state.seasonStart === modernStart && state.seasonEnd === maxSeason;
-      else if (p === "LAST5") active = state.seasonStart === maxSeason - 4 && state.seasonEnd === maxSeason;
-      else if (p === "2025") active = state.seasonStart === maxSeason && state.seasonEnd === maxSeason;
+      else if (p === "LAST5") active = state.seasonStart === Math.max(minSeason, maxSeason - 4) && state.seasonEnd === maxSeason;
+      else if (p === "CURRENT") active = state.seasonStart === maxSeason && state.seasonEnd === maxSeason;
       btn.classList.toggle("is-active", active);
     });
 
@@ -1573,9 +1585,9 @@
           state.seasonStart = modernStart;
           state.seasonEnd = maxSeason;
         } else if (p === "LAST5") {
-          state.seasonStart = maxSeason - 4;
+          state.seasonStart = Math.max(minSeason, maxSeason - 4);
           state.seasonEnd = maxSeason;
-        } else if (p === "2025") {
+        } else if (p === "CURRENT") {
           state.seasonStart = maxSeason;
           state.seasonEnd = maxSeason;
         }
@@ -1691,41 +1703,152 @@
     Chart.defaults.plugins.tooltip.titleFont = { weight: "700", size: 12 };
   }
 
+  function formatDateTimeBRT(isoString) {
+    if (!isoString) return null;
+    const dt = new Date(isoString);
+    if (Number.isNaN(dt.getTime())) return null;
+    try {
+      const dateStr = dt.toLocaleDateString("pt-BR", {
+        timeZone: "America/Sao_Paulo",
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric",
+      });
+      const timeStr = dt.toLocaleTimeString("pt-BR", {
+        timeZone: "America/Sao_Paulo",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      });
+      return `${dateStr} às ${timeStr}`;
+    } catch {
+      const d = String(dt.getDate()).padStart(2, "0");
+      const m = String(dt.getMonth() + 1).padStart(2, "0");
+      const y = dt.getFullYear();
+      const hh = String(dt.getHours()).padStart(2, "0");
+      const mm = String(dt.getMinutes()).padStart(2, "0");
+      return `${d}/${m}/${y} às ${hh}:${mm}`;
+    }
+  }
+
+  function applyDynamicSeasonLabels() {
+    const shortMin = String(minSeason).slice(-2);
+    const shortMax = String(maxSeason).slice(-2);
+    const shortModern = String(modernStart).slice(-2);
+    const totalSeasons = new Set(allMatches.map((m) => m.temporada)).size;
+    const detailedGames = allMatches.filter(
+      (m) => (m.cartoes_amarelos !== null && m.cartoes_vermelhos !== null) || Array.isArray(m.gols)
+    ).length;
+
+    document.title = `Dados Tricolor — São Paulo FC nos Pontos Corridos (${minSeason}–${maxSeason})`;
+    if (dom["brand-subtitle"]) {
+      dom["brand-subtitle"].textContent = `São Paulo FC no Campeonato Brasileiro · Era dos Pontos Corridos (${minSeason}–${maxSeason})`;
+    }
+    dom["header-dataset-badge"].textContent = `${totalSeasons} temporadas · ${fmtInt.format(allMatches.length)} jogos`;
+
+    if (dom["chip-period-all"]) {
+      dom["chip-period-all"].textContent = `Todas (${shortMin}–${shortMax})`;
+    }
+    if (dom["chip-period-modern"]) {
+      dom["chip-period-modern"].textContent = `Com Gols/Cartões (${shortModern}–${shortMax})`;
+    }
+    if (dom["chip-period-current"]) {
+      dom["chip-period-current"].textContent = String(maxSeason);
+    }
+    if (dom["scorers-coverage-badge"]) {
+      dom["scorers-coverage-badge"].textContent = `Base ${modernStart}–${maxSeason}`;
+    }
+    if (dom["btn-jump-modern-scorers"]) {
+      dom["btn-jump-modern-scorers"].textContent = `Ver período ${modernStart}–${maxSeason}`;
+    }
+    if (dom["btn-jump-modern-cards"]) {
+      dom["btn-jump-modern-cards"].textContent = `Ver período ${modernStart}–${maxSeason}`;
+    }
+    if (dom["footer-range-all"]) {
+      dom["footer-range-all"].textContent = `${minSeason} a ${maxSeason}`;
+    }
+    if (dom["footer-games-all"]) {
+      dom["footer-games-all"].textContent = fmtInt.format(allMatches.length);
+    }
+    if (dom["footer-range-modern"]) {
+      dom["footer-range-modern"].textContent = `${modernStart} a ${maxSeason}`;
+    }
+    if (dom["footer-games-modern"]) {
+      dom["footer-games-modern"].textContent = fmtInt.format(detailedGames);
+    }
+  }
+
+  function applyAutoUpdateBadge(syncMeta) {
+    let formatted = null;
+    if (syncMeta && typeof syncMeta.atualizado_em_brt === "string" && syncMeta.atualizado_em_brt.trim()) {
+      formatted = syncMeta.atualizado_em_brt.trim();
+    } else if (syncMeta && syncMeta.atualizado_em) {
+      formatted = formatDateTimeBRT(syncMeta.atualizado_em);
+    } else if (datasetMeta && datasetMeta.gerado_em) {
+      formatted = formatDateTimeBRT(datasetMeta.gerado_em);
+    }
+
+    if (!formatted) return;
+
+    const label = `Atualizado automaticamente em ${formatted}`;
+    if (dom["header-updated-badge"] && dom["header-updated-text"]) {
+      dom["header-updated-text"].textContent = label;
+      dom["header-updated-badge"].classList.remove("is-hidden");
+    }
+    if (dom["footer-updated-at"]) {
+      dom["footer-updated-at"].textContent = `${label} · GitHub Pages`;
+    }
+  }
+
+  async function fetchSyncMeta() {
+    try {
+      const resp = await fetch(META_URL, { cache: "no-cache" });
+      if (!resp.ok) return null;
+      return await resp.json();
+    } catch {
+      return null;
+    }
+  }
+
   async function init() {
     cacheDom();
     configureChartDefaults();
 
     try {
-      const response = await fetch(DATA_URL, { cache: "no-cache" });
+      const [response, syncMeta] = await Promise.all([
+        fetch(DATA_URL, { cache: "no-cache" }),
+        fetchSyncMeta(),
+      ]);
       if (!response.ok) {
         throw new Error(`HTTP ${response.status} ao carregar ${DATA_URL}`);
       }
       const payload = await response.json();
-      if (!payload || !Array.isArray(payload.partidas)) {
-        throw new Error("Formato de JSON inválido: campo 'partidas' ausente.");
+      if (!payload || !Array.isArray(payload.partidas) || payload.partidas.length === 0) {
+        throw new Error("Formato de JSON inválido: campo 'partidas' ausente ou vazio.");
       }
 
       allMatches = payload.partidas;
       datasetMeta = payload.metadata || {};
 
-      minSeason = datasetMeta.temporada_inicio || Math.min(...allMatches.map((m) => m.temporada));
-      maxSeason = datasetMeta.temporada_fim || Math.max(...allMatches.map((m) => m.temporada));
-      if (Array.isArray(datasetMeta.temporadas_com_cartoes) && datasetMeta.temporadas_com_cartoes.length) {
+      // Calcula os limites de temporada dinamicamente a partir das partidas carregadas
+      const seasons = allMatches.map((m) => m.temporada);
+      minSeason = Math.min(...seasons);
+      maxSeason = Math.max(...seasons);
+
+      const detailedSeasons = allMatches
+        .filter((m) => (m.cartoes_amarelos !== null && m.cartoes_vermelhos !== null) || Array.isArray(m.gols))
+        .map((m) => m.temporada);
+      if (detailedSeasons.length > 0) {
+        modernStart = Math.min(...detailedSeasons);
+      } else if (Array.isArray(datasetMeta.temporadas_com_cartoes) && datasetMeta.temporadas_com_cartoes.length) {
         modernStart = Math.min(...datasetMeta.temporadas_com_cartoes);
       }
 
       state.seasonStart = minSeason;
       state.seasonEnd = maxSeason;
 
-      const totalSeasons = maxSeason - minSeason + 1;
-      dom["header-dataset-badge"].textContent = `${totalSeasons} temporadas · ${fmtInt.format(allMatches.length)} jogos`;
-
-      if (datasetMeta.gerado_em) {
-        const dt = new Date(datasetMeta.gerado_em);
-        if (!Number.isNaN(dt.getTime())) {
-          dom["footer-updated-at"].textContent = `Base gerada em ${dt.toLocaleDateString("pt-BR")} · GitHub Pages`;
-        }
-      }
+      applyDynamicSeasonLabels();
+      applyAutoUpdateBadge(syncMeta);
 
       populateSelectOptions();
       bindEvents();

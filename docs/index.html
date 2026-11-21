@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Dados Tricolor — São Paulo FC nos Pontos Corridos (2003–2025)</title>
+  <title>Dados Tricolor — São Paulo FC nos Pontos Corridos</title>
   <meta
     name="description"
-    content="Painel interativo de análise estatística do São Paulo Futebol Clube no Campeonato Brasileiro na era dos pontos corridos (2003 a 2025)."
+    content="Painel interativo de análise estatística do São Paulo Futebol Clube no Campeonato Brasileiro na era dos pontos corridos (desde 2003)."
   />
   <link
     rel="icon"
@@ -50,16 +50,22 @@
         </div>
         <div>
           <h1 class="brand-title">DADOS TRICOLOR</h1>
-          <p class="brand-subtitle">
-            São Paulo FC no Campeonato Brasileiro · Era dos Pontos Corridos (2003–2025)
+          <p class="brand-subtitle" id="brand-subtitle">
+            São Paulo FC no Campeonato Brasileiro · Era dos Pontos Corridos
           </p>
         </div>
       </div>
 
-      <div class="header-badges">
-        <span class="header-pill" id="header-dataset-badge">23 temporadas · 894 jogos</span>
-        <span class="header-pill header-pill--accent" title="Campeão Brasileiro consecutivo em 2006, 2007 e 2008">
-          ★ Tri 2006 · 2007 · 2008
+      <div class="header-meta-group">
+        <div class="header-badges">
+          <span class="header-pill" id="header-dataset-badge">Carregando base...</span>
+          <span class="header-pill header-pill--accent" title="Campeão Brasileiro consecutivo em 2006, 2007 e 2008">
+            ★ Tri 2006 · 2007 · 2008
+          </span>
+        </div>
+        <span class="header-sync-badge is-hidden" id="header-updated-badge">
+          <span class="sync-dot" aria-hidden="true"></span>
+          <span id="header-updated-text"></span>
         </span>
       </div>
     </div>
@@ -123,11 +129,11 @@
         <div class="filters-shortcuts-row">
           <div class="shortcuts-group">
             <span class="shortcuts-caption">Períodos:</span>
-            <button type="button" class="chip-btn is-active" data-preset-period="ALL">Todas (03–25)</button>
+            <button type="button" class="chip-btn is-active" id="chip-period-all" data-preset-period="ALL">Todas</button>
             <button type="button" class="chip-btn" data-preset-period="TRI">Tri (06–08)</button>
-            <button type="button" class="chip-btn" data-preset-period="MODERN">Com Gols/Cartões (14–25)</button>
+            <button type="button" class="chip-btn" id="chip-period-modern" data-preset-period="MODERN">Com Gols/Cartões</button>
             <button type="button" class="chip-btn" data-preset-period="LAST5">Últimos 5 anos</button>
-            <button type="button" class="chip-btn" data-preset-period="2025">2025</button>
+            <button type="button" class="chip-btn" id="chip-period-current" data-preset-period="CURRENT">Temporada atual</button>
           </div>
 
           <div class="shortcuts-group">
@@ -161,7 +167,7 @@
       <div class="spinner" aria-hidden="true"></div>
       <div>
         <strong>Carregando base histórica do Tricolor...</strong>
-        <p>Lendo partidas do Brasileirão de 2003 a 2025.</p>
+        <p>Lendo partidas do Brasileirão na era dos pontos corridos.</p>
       </div>
     </div>
 
@@ -199,7 +205,7 @@
         <article class="kpi-card">
           <div class="kpi-header">
             <span class="kpi-title">Partidas</span>
-            <span class="kpi-tag" id="kpi-seasons-tag">23 temps.</span>
+            <span class="kpi-tag" id="kpi-seasons-tag">—</span>
           </div>
           <div class="kpi-value" id="kpi-games">0</div>
           <p class="kpi-subtext" id="kpi-games-split">0 Casa · 0 Fora</p>
@@ -274,7 +280,7 @@
               </div>
             </div>
           </div>
-          <p class="kpi-subtext kpi-subtext--coverage" id="kpi-cards-coverage">Base: 2014–2025</p>
+          <p class="kpi-subtext kpi-subtext--coverage" id="kpi-cards-coverage">Base: —</p>
         </article>
       </section>
 
@@ -356,14 +362,14 @@
                 Ranking dinâmico conforme os filtros · exclui gols contra
               </p>
             </div>
-            <span class="coverage-badge">Base 2014–2025</span>
+            <span class="coverage-badge" id="scorers-coverage-badge">Base detalhada</span>
           </div>
           <div class="chart-stage">
             <canvas id="chart-scorers"></canvas>
             <div id="empty-scorers" class="chart-empty is-hidden">
               <p id="empty-scorers-text">Sem registros de artilharia para o recorte selecionado.</p>
               <button type="button" class="btn-outline-sm is-hidden" id="btn-jump-modern-scorers">
-                Ver período 2014–2025
+                Ver período com registros
               </button>
             </div>
           </div>
@@ -375,7 +381,7 @@
             <div>
               <h2 class="chart-title" id="secondary-title">Disciplina por Temporada</h2>
               <p class="chart-subtitle" id="secondary-subtitle">
-                Média de cartões amarelos por jogo e total de expulsões do SPFC (base 2014–2025)
+                Média de cartões amarelos por jogo e total de expulsões do SPFC
               </p>
             </div>
             <div class="chart-controls">
@@ -394,7 +400,7 @@
             <div id="empty-secondary" class="chart-empty is-hidden">
               <p id="empty-secondary-text">Sem dados disciplinares disponíveis para o período selecionado.</p>
               <button type="button" class="btn-outline-sm is-hidden" id="btn-jump-modern-cards">
-                Ver período 2014–2025
+                Ver período com registros
               </button>
             </div>
           </div>
@@ -502,12 +508,12 @@
           <strong>Dados Tricolor · Nota Metodológica</strong>
         </div>
         <p>
-          Base estruturada a partir do dataset público do Campeonato Brasileiro no
-          <strong>Kaggle</strong> (arquivos <code>full</code>, <code>cartoes</code>, <code>estatisticas-full</code> e <code>gols</code>),
-          processada em Python/Pandas para a perspectiva exclusiva do São Paulo FC.
+          Base híbrida estruturada com o histórico consolidado do Campeonato Brasileiro no
+          <strong>Kaggle</strong> (2003–2025) e atualização incremental automatizada via
+          <strong>API pública da ESPN</strong> + <strong>GitHub Actions</strong> a partir da temporada 2026.
         </p>
         <p>
-          <strong>Cobertura:</strong> partidas, placares, mando e estádios de <strong>2003 a 2025</strong> (894 jogos, incluindo as 11 rodadas finais da edição 2020 disputadas em jan–fev/2021). Cartões disciplinares e artilharia detalhada possuem registro de <strong>2014 a 2025</strong> (456 jogos); médias de cartões consideram exclusivamente partidas com cobertura de dados, e gols contra a favor do SPFC <code>(GC)</code> não entram na artilharia individual.
+          <strong>Cobertura:</strong> partidas, placares, mando e estádios de <strong id="footer-range-all">2003 em diante</strong> (<span id="footer-games-all">—</span> jogos, incluindo as 11 rodadas finais da edição 2020 disputadas em jan–fev/2021). Cartões disciplinares e artilharia detalhada possuem registro de <strong id="footer-range-modern">2014 em diante</strong> (<span id="footer-games-modern">—</span> jogos); médias de cartões consideram exclusivamente partidas com cobertura de dados, e gols contra a favor do SPFC <code>(GC)</code> não entram na artilharia individual.
         </p>
       </div>
 
