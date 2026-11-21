@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dados Tricolor — São Paulo FC nos Pontos Corridos (2003–2025)</title>
+  <meta
+    name="description"
+    content="Painel interativo de análise estatística do São Paulo Futebol Clube no Campeonato Brasileiro na era dos pontos corridos (2003 a 2025)."
+  />
+  <link
+    rel="icon"
+    type="image/svg+xml"
+    href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23111315'/%3E%3Crect x='10' y='12' width='44' height='12' rx='2' fill='%23D5001C'/%3E%3Crect x='10' y='26' width='44' height='12' rx='2' fill='%23FFFFFF'/%3E%3Crect x='10' y='40' width='44' height='12' rx='2' fill='%23111315' stroke='%23FFFFFF' stroke-width='2'/%3E%3C/svg%3E"
+  />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap"
+    rel="stylesheet"
+  />
+  <link rel="stylesheet" href="css/style.css" />
+  <script
+    src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"
+    defer
+  ></script>
+  <script src="js/app.js" defer></script>
+</head>
+<body>
+  <!-- Faixa tricolor de identidade visual -->
+  <div class="tricolor-ribbon" aria-hidden="true">
+    <span class="ribbon-red"></span>
+    <span class="ribbon-white"></span>
+    <span class="ribbon-black"></span>
+  </div>
+
+  <!-- Cabeçalho -->
+  <header class="site-header">
+    <div class="container header-inner">
+      <div class="brand-group">
+        <div class="brand-emblem" aria-hidden="true">
+          <svg viewBox="0 0 44 48" width="44" height="48" fill="none">
+            <path d="M2 5C2 3.34315 3.34315 2 5 2H39C40.6569 2 42 3.34315 42 5V24C42 35.5 22 46 22 46C22 46 2 35.5 2 24V5Z" fill="#181B20" stroke="#FFFFFF" stroke-width="2.5"/>
+            <path d="M4.5 5H39.5V16.5H4.5V5Z" fill="#D5001C"/>
+            <rect x="4.5" y="16.5" width="35" height="6.5" fill="#FFFFFF"/>
+            <path d="M5 23H21V42.5C13 38 5.8 31.5 5 23Z" fill="#D5001C"/>
+            <path d="M23 23H39C38.2 31.5 31 38 23 42.5V23Z" fill="#111315"/>
+            <rect x="21" y="23" width="2" height="20" fill="#FFFFFF"/>
+          </svg>
+        </div>
+        <div>
+          <h1 class="brand-title">DADOS TRICOLOR</h1>
+          <p class="brand-subtitle">
+            São Paulo FC no Campeonato Brasileiro · Era dos Pontos Corridos (2003–2025)
+          </p>
+        </div>
+      </div>
+
+      <div class="header-badges">
+        <span class="header-pill" id="header-dataset-badge">23 temporadas · 894 jogos</span>
+        <span class="header-pill header-pill--accent" title="Campeão Brasileiro consecutivo em 2006, 2007 e 2008">
+          ★ Tri 2006 · 2007 · 2008
+        </span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Barra de Filtros (sticky apenas no desktop via CSS) -->
+  <section class="filters-wrapper" aria-label="Filtros de análise">
+    <div class="container">
+      <div class="filters-panel">
+        <div class="filters-main-row">
+          <!-- Intervalo de Temporadas -->
+          <div class="filter-group filter-group--seasons">
+            <span class="filter-label">Temporada</span>
+            <div class="season-range">
+              <label class="sr-only" for="filter-season-start">Temporada inicial</label>
+              <select id="filter-season-start" class="control-select" aria-label="Temporada inicial"></select>
+              <span class="range-sep">até</span>
+              <label class="sr-only" for="filter-season-end">Temporada final</label>
+              <select id="filter-season-end" class="control-select" aria-label="Temporada final"></select>
+            </div>
+          </div>
+
+          <!-- Adversário -->
+          <div class="filter-group filter-group--opponent">
+            <label class="filter-label" for="filter-opponent">Adversário</label>
+            <select id="filter-opponent" class="control-select">
+              <option value="ALL">Todos os adversários</option>
+              <option value="CLASSICOS">Todos os Clássicos (COR · PAL · SAN)</option>
+            </select>
+          </div>
+
+          <!-- Mando de Campo -->
+          <div class="filter-group filter-group--venue">
+            <span class="filter-label">Mando de campo</span>
+            <div class="segmented-control" role="group" aria-label="Filtrar por mando de campo">
+              <button type="button" class="segmented-btn is-active" data-venue="ALL" aria-pressed="true">
+                Todos
+              </button>
+              <button type="button" class="segmented-btn" data-venue="Casa" aria-pressed="false">
+                Casa
+              </button>
+              <button type="button" class="segmented-btn" data-venue="Fora" aria-pressed="false">
+                Fora
+              </button>
+            </div>
+          </div>
+
+          <!-- Ação de reset -->
+          <div class="filter-group filter-group--actions">
+            <button type="button" id="btn-reset-filters" class="btn-reset" disabled>
+              <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <path d="M3 10a7 7 0 1 1 2.05 4.95" stroke-linecap="round"/>
+                <path d="M3 15v-5h5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              Limpar filtros
+            </button>
+          </div>
+        </div>
+
+        <!-- Linha de Atalhos Rápidos + Contador -->
+        <div class="filters-shortcuts-row">
+          <div class="shortcuts-group">
+            <span class="shortcuts-caption">Períodos:</span>
+            <button type="button" class="chip-btn is-active" data-preset-period="ALL">Todas (03–25)</button>
+            <button type="button" class="chip-btn" data-preset-period="TRI">Tri (06–08)</button>
+            <button type="button" class="chip-btn" data-preset-period="MODERN">Com Gols/Cartões (14–25)</button>
+            <button type="button" class="chip-btn" data-preset-period="LAST5">Últimos 5 anos</button>
+            <button type="button" class="chip-btn" data-preset-period="2025">2025</button>
+          </div>
+
+          <div class="shortcuts-group">
+            <span class="shortcuts-caption">Clássicos:</span>
+            <button type="button" class="chip-btn chip-btn--classic" data-preset-opponent="CLASSICOS">
+              Todos os Clássicos
+            </button>
+            <button type="button" class="chip-btn chip-btn--classic" data-preset-opponent="Corinthians">
+              Corinthians
+            </button>
+            <button type="button" class="chip-btn chip-btn--classic" data-preset-opponent="Palmeiras">
+              Palmeiras
+            </button>
+            <button type="button" class="chip-btn chip-btn--classic" data-preset-opponent="Santos">
+              Santos
+            </button>
+          </div>
+
+          <div class="filter-status-pill" id="filter-status-count" aria-live="polite">
+            Carregando partidas...
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Conteúdo Principal -->
+  <main class="container main-content">
+    <!-- Estado de Carregamento -->
+    <div id="state-loading" class="status-banner status-banner--loading" role="status">
+      <div class="spinner" aria-hidden="true"></div>
+      <div>
+        <strong>Carregando base histórica do Tricolor...</strong>
+        <p>Lendo partidas do Brasileirão de 2003 a 2025.</p>
+      </div>
+    </div>
+
+    <!-- Estado de Erro -->
+    <div id="state-error" class="status-banner status-banner--error is-hidden" role="alert">
+      <div>
+        <strong>Não foi possível carregar os dados estatísticos.</strong>
+        <p id="state-error-message">
+          Verifique se o arquivo <code>data/spfc_pontos_corridos.json</code> está disponível e sirva a pasta <code>docs/</code> via HTTP.
+        </p>
+      </div>
+    </div>
+
+    <!-- Dashboard -->
+    <div id="dashboard-root" class="is-hidden">
+      <!-- Aviso quando a combinação de filtros retorna 0 partidas -->
+      <div id="empty-filter-banner" class="empty-banner is-hidden" role="status">
+        <div class="empty-banner-content">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <circle cx="11" cy="11" r="7"/>
+            <path d="M20 20l-3.5-3.5" stroke-linecap="round"/>
+            <path d="M8.5 11h5" stroke-linecap="round"/>
+          </svg>
+          <div>
+            <strong>Nenhuma partida encontrada para esta combinação de filtros.</strong>
+            <p id="empty-filter-detail">Ajuste o período, o adversário ou o mando de campo para visualizar os indicadores.</p>
+          </div>
+        </div>
+        <button type="button" id="btn-empty-reset" class="btn-primary-sm">Limpar filtros</button>
+      </div>
+
+      <!-- Cards de KPI -->
+      <section class="kpi-grid" aria-label="Indicadores principais de desempenho">
+        <!-- KPI 1: Jogos -->
+        <article class="kpi-card">
+          <div class="kpi-header">
+            <span class="kpi-title">Partidas</span>
+            <span class="kpi-tag" id="kpi-seasons-tag">23 temps.</span>
+          </div>
+          <div class="kpi-value" id="kpi-games">0</div>
+          <p class="kpi-subtext" id="kpi-games-split">0 Casa · 0 Fora</p>
+        </article>
+
+        <!-- KPI 2: Aproveitamento -->
+        <article class="kpi-card kpi-card--featured">
+          <div class="kpi-header">
+            <span class="kpi-title">Aproveitamento</span>
+            <span class="kpi-tag kpi-tag--red" id="kpi-points-tag">0 pts</span>
+          </div>
+          <div class="kpi-value" id="kpi-winrate">—</div>
+          <div class="progress-track" aria-hidden="true">
+            <div class="progress-fill" id="kpi-winrate-bar" style="width: 0%"></div>
+          </div>
+          <p class="kpi-subtext" id="kpi-points-detail">0 de 0 pontos possíveis</p>
+        </article>
+
+        <!-- KPI 3: V / E / D -->
+        <article class="kpi-card">
+          <div class="kpi-header">
+            <span class="kpi-title">Retrospecto (V · E · D)</span>
+          </div>
+          <div class="kpi-ved-row" id="kpi-ved-values">
+            <span class="ved-item ved-item--win"><strong id="kpi-wins">0</strong>V</span>
+            <span class="ved-sep">·</span>
+            <span class="ved-item ved-item--draw"><strong id="kpi-draws">0</strong>E</span>
+            <span class="ved-sep">·</span>
+            <span class="ved-item ved-item--loss"><strong id="kpi-losses">0</strong>D</span>
+          </div>
+          <div class="ved-bar" aria-hidden="true">
+            <span class="ved-seg ved-seg--win" id="kpi-bar-win" style="width: 0%"></span>
+            <span class="ved-seg ved-seg--draw" id="kpi-bar-draw" style="width: 0%"></span>
+            <span class="ved-seg ved-seg--loss" id="kpi-bar-loss" style="width: 0%"></span>
+          </div>
+          <p class="kpi-subtext" id="kpi-ved-pct">—</p>
+        </article>
+
+        <!-- KPI 4: Gols & Saldo -->
+        <article class="kpi-card">
+          <div class="kpi-header">
+            <span class="kpi-title">Gols &amp; Saldo</span>
+            <span class="kpi-tag" id="kpi-gd-badge">SG 0</span>
+          </div>
+          <div class="kpi-goals-row">
+            <span class="goals-stat"><strong id="kpi-gf">0</strong> <small>GP</small></span>
+            <span class="goals-divider">/</span>
+            <span class="goals-stat"><strong id="kpi-ga">0</strong> <small>GC</small></span>
+          </div>
+          <p class="kpi-subtext" id="kpi-goals-avg">Média: —</p>
+        </article>
+
+        <!-- KPI 5: Disciplina -->
+        <article class="kpi-card">
+          <div class="kpi-header">
+            <span class="kpi-title">Disciplina</span>
+            <span class="kpi-tag">Cartões</span>
+          </div>
+          <div class="kpi-cards-row">
+            <div class="card-metric">
+              <span class="ref-card ref-card--yellow" aria-hidden="true"></span>
+              <div>
+                <strong id="kpi-yellow-total">—</strong>
+                <small id="kpi-yellow-avg">—</small>
+              </div>
+            </div>
+            <div class="card-metric">
+              <span class="ref-card ref-card--red" aria-hidden="true"></span>
+              <div>
+                <strong id="kpi-red-total">—</strong>
+                <small id="kpi-red-avg">—</small>
+              </div>
+            </div>
+          </div>
+          <p class="kpi-subtext kpi-subtext--coverage" id="kpi-cards-coverage">Base: 2014–2025</p>
+        </article>
+      </section>
+
+      <!-- Seção de Gráficos -->
+      <section class="charts-grid" aria-label="Gráficos interativos">
+        <!-- Gráfico 1: Evolução por Temporada / Rodada a Rodada -->
+        <article class="chart-card chart-card--wide">
+          <div class="chart-card-header">
+            <div>
+              <h2 class="chart-title" id="evolution-title">Evolução por Temporada</h2>
+              <p class="chart-subtitle" id="evolution-subtitle">
+                Clique em qualquer ano para filtrar a campanha específica · ★ Tricampeonato (2006–2008)
+              </p>
+            </div>
+            <div class="chart-controls">
+              <button type="button" id="btn-back-all-seasons" class="chip-btn is-hidden">
+                ← Todas as temporadas
+              </button>
+              <div class="mini-tabs" role="tablist" aria-label="Modo do gráfico de evolução">
+                <button type="button" class="mini-tab is-active" data-evolution-mode="performance" role="tab" aria-selected="true">
+                  Aproveitamento &amp; V/E/D
+                </button>
+                <button type="button" class="mini-tab" data-evolution-mode="goals" role="tab" aria-selected="false">
+                  Gols Pró vs. Contra
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="chart-stage chart-stage--tall">
+            <canvas id="chart-evolution"></canvas>
+            <div id="empty-evolution" class="chart-empty is-hidden">
+              <p>Sem partidas no recorte atual para exibir a evolução histórica.</p>
+            </div>
+          </div>
+        </article>
+
+        <!-- Gráfico 2: Desempenho por Mando (Casa vs Fora) -->
+        <article class="chart-card">
+          <div class="chart-card-header">
+            <div>
+              <h2 class="chart-title">Desempenho por Mando</h2>
+              <p class="chart-subtitle" id="venue-subtitle">
+                Comparativo percentual entre jogos em Casa e Fora
+              </p>
+            </div>
+          </div>
+          <div class="chart-stage">
+            <canvas id="chart-venue"></canvas>
+            <div id="empty-venue" class="chart-empty is-hidden">
+              <p>Sem partidas disponíveis para comparar mando de campo.</p>
+            </div>
+          </div>
+          <div class="venue-summary" id="venue-summary">
+            <div class="venue-box venue-box--home">
+              <div class="venue-box-head">
+                <span class="venue-dot venue-dot--home"></span>
+                <strong>Casa</strong>
+                <span class="venue-games" id="venue-home-games">0 jogos</span>
+              </div>
+              <div class="venue-box-stats" id="venue-home-stats">—</div>
+            </div>
+            <div class="venue-box venue-box--away">
+              <div class="venue-box-head">
+                <span class="venue-dot venue-dot--away"></span>
+                <strong>Fora</strong>
+                <span class="venue-games" id="venue-away-games">0 jogos</span>
+              </div>
+              <div class="venue-box-stats" id="venue-away-stats">—</div>
+            </div>
+          </div>
+        </article>
+
+        <!-- Gráfico 3: Top Artilheiros Dinâmico -->
+        <article class="chart-card">
+          <div class="chart-card-header">
+            <div>
+              <h2 class="chart-title">Top 10 Artilheiros</h2>
+              <p class="chart-subtitle" id="scorers-subtitle">
+                Ranking dinâmico conforme os filtros · exclui gols contra
+              </p>
+            </div>
+            <span class="coverage-badge">Base 2014–2025</span>
+          </div>
+          <div class="chart-stage">
+            <canvas id="chart-scorers"></canvas>
+            <div id="empty-scorers" class="chart-empty is-hidden">
+              <p id="empty-scorers-text">Sem registros de artilharia para o recorte selecionado.</p>
+              <button type="button" class="btn-outline-sm is-hidden" id="btn-jump-modern-scorers">
+                Ver período 2014–2025
+              </button>
+            </div>
+          </div>
+        </article>
+
+        <!-- Gráfico 4: Disciplina & Raio-X por Adversário (com abas) -->
+        <article class="chart-card chart-card--wide">
+          <div class="chart-card-header">
+            <div>
+              <h2 class="chart-title" id="secondary-title">Disciplina por Temporada</h2>
+              <p class="chart-subtitle" id="secondary-subtitle">
+                Média de cartões amarelos por jogo e total de expulsões do SPFC (base 2014–2025)
+              </p>
+            </div>
+            <div class="chart-controls">
+              <div class="mini-tabs" role="tablist" aria-label="Análises complementares">
+                <button type="button" class="mini-tab is-active" data-secondary-tab="discipline" role="tab" aria-selected="true">
+                  Disciplina (Cartões)
+                </button>
+                <button type="button" class="mini-tab" data-secondary-tab="opponents" role="tab" aria-selected="false">
+                  Retrospecto por Adversário
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="chart-stage chart-stage--medium">
+            <canvas id="chart-secondary"></canvas>
+            <div id="empty-secondary" class="chart-empty is-hidden">
+              <p id="empty-secondary-text">Sem dados disciplinares disponíveis para o período selecionado.</p>
+              <button type="button" class="btn-outline-sm is-hidden" id="btn-jump-modern-cards">
+                Ver período 2014–2025
+              </button>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <!-- Tabela de Partidas Filtradas -->
+      <section class="table-card" aria-label="Tabela de partidas filtradas">
+        <div class="table-header">
+          <div>
+            <h2 class="chart-title">
+              Partidas Filtradas
+              <span class="table-count-badge" id="table-total-badge">0</span>
+            </h2>
+            <p class="chart-subtitle">
+              Busque por adversário, artilheiro, estádio ou técnico e clique nos cabeçalhos para ordenar
+            </p>
+          </div>
+
+          <div class="table-toolbar">
+            <div class="search-box">
+              <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <circle cx="9" cy="9" r="6"/>
+                <path d="M17 17l-3.5-3.5" stroke-linecap="round"/>
+              </svg>
+              <label class="sr-only" for="table-search">Buscar na tabela de partidas</label>
+              <input
+                type="search"
+                id="table-search"
+                class="search-input"
+                placeholder="Buscar adversário, artilheiro, estádio..."
+                autocomplete="off"
+              />
+            </div>
+
+            <div class="result-pills" role="group" aria-label="Filtrar tabela por resultado">
+              <button type="button" class="result-pill is-active" data-result="ALL">Todos</button>
+              <button type="button" class="result-pill" data-result="V">Vitórias</button>
+              <button type="button" class="result-pill" data-result="E">Empates</button>
+              <button type="button" class="result-pill" data-result="D">Derrotas</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="table-wrapper">
+          <table class="matches-table">
+            <thead>
+              <tr>
+                <th>
+                  <button type="button" class="sort-btn is-sorted-desc" data-sort="data">
+                    Data <span class="sort-icon" aria-hidden="true">↓</span>
+                  </button>
+                </th>
+                <th>
+                  <button type="button" class="sort-btn" data-sort="temporada">
+                    Temp. / Rod. <span class="sort-icon" aria-hidden="true">↕</span>
+                  </button>
+                </th>
+                <th>Mando</th>
+                <th>
+                  <button type="button" class="sort-btn" data-sort="adversario">
+                    Adversário <span class="sort-icon" aria-hidden="true">↕</span>
+                  </button>
+                </th>
+                <th>
+                  <button type="button" class="sort-btn" data-sort="saldo_gols">
+                    Placar <span class="sort-icon" aria-hidden="true">↕</span>
+                  </button>
+                </th>
+                <th>Gols do SPFC</th>
+                <th>Cartões</th>
+                <th>Estádio / Técnico</th>
+              </tr>
+            </thead>
+            <tbody id="matches-tbody"></tbody>
+          </table>
+        </div>
+
+        <div class="table-footer">
+          <div class="pagination-info" id="pagination-info">Mostrando 0 de 0 partidas</div>
+          <div class="pagination-controls">
+            <label class="page-size-label">
+              Por página:
+              <select id="table-page-size" class="control-select control-select--sm">
+                <option value="15">15</option>
+                <option value="25" selected>25</option>
+                <option value="50">50</option>
+              </select>
+            </label>
+            <button type="button" id="btn-prev-page" class="page-btn" disabled>← Anterior</button>
+            <span class="page-indicator" id="page-indicator">1 / 1</span>
+            <button type="button" id="btn-next-page" class="page-btn" disabled>Próxima →</button>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <!-- Rodapé com Nota Metodológica e Link do GitHub -->
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <div class="footer-methodology">
+        <div class="footer-brand">
+          <span class="footer-dot" aria-hidden="true"></span>
+          <strong>Dados Tricolor · Nota Metodológica</strong>
+        </div>
+        <p>
+          Base estruturada a partir do dataset público do Campeonato Brasileiro no
+          <strong>Kaggle</strong> (arquivos <code>full</code>, <code>cartoes</code>, <code>estatisticas-full</code> e <code>gols</code>),
+          processada em Python/Pandas para a perspectiva exclusiva do São Paulo FC.
+        </p>
+        <p>
+          <strong>Cobertura:</strong> partidas, placares, mando e estádios de <strong>2003 a 2025</strong> (894 jogos, incluindo as 11 rodadas finais da edição 2020 disputadas em jan–fev/2021). Cartões disciplinares e artilharia detalhada possuem registro de <strong>2014 a 2025</strong> (456 jogos); médias de cartões consideram exclusivamente partidas com cobertura de dados, e gols contra a favor do SPFC <code>(GC)</code> não entram na artilharia individual.
+        </p>
+      </div>
+
+      <div class="footer-links">
+        <a
+          href="https://github.com/YuriAlvvvss/SPFC-Analytics"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="github-link"
+        >
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+            <path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0 1 12 6.844a9.59 9.59 0 0 1 2.504.337c1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.02 10.02 0 0 0 22 12.017C22 6.484 17.522 2 12 2Z"/>
+          </svg>
+          Ver repositório no GitHub
+        </a>
+        <span class="footer-meta" id="footer-updated-at">Site estático · GitHub Pages</span>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

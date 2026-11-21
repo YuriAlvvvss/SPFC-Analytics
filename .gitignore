@@ -221,3 +221,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Dados brutos do Kaggle (CSVs originais)
+data/raw/*
+!data/raw/.gitkeep
+
