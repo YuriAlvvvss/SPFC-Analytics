@@ -10,16 +10,22 @@ exporta o arquivo limpo para `docs/data/spfc_pontos_corridos.json`.
 
 from __future__ import annotations
 
+import argparse
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
+try:
+    import pandas as pd
+except ModuleNotFoundError:  # Permite executar --patch-json sem pandas instalado
+    pd = None  # type: ignore[assignment]
 
 # Caminhos do projeto (relativos ao repositório, independentes do diretório atual)
 BASE_DIR = Path(__file__).resolve().parent.parent
 RAW_DIR = BASE_DIR / "data" / "raw"
+HISTORICO_PATH = BASE_DIR / "data" / "historico_2003_2025.json"
 OUTPUT_PATH = BASE_DIR / "docs" / "data" / "spfc_pontos_corridos.json"
 
 ARQUIVO_PARTIDAS = RAW_DIR / "campeonato-brasileiro-full.csv"
@@ -103,6 +109,16 @@ MAPA_TIPO_GOL: dict[str, str] = {
     "Gol Contra": "Gol contra",
 }
 
+# Correções pontuais de datas comprovadamente incorretas nos CSVs originais do Kaggle,
+# indexadas por `ID` da partida (mantendo os arquivos brutos em `data/raw/` intactos).
+# Erros identificados pela suíte de qualidade de dados (`tests/test_data_quality.py`).
+CORRECOES_DATAS_POR_ID: dict[int, str] = {
+    # 2008 R11 (Casa vs Palmeiras): CSV trazia 2008-07-06 (mesma data da R9 vs Ipatinga)
+    2417: "2008-07-13",
+    # 2010 R5 (Fora vs Guarani): CSV trazia 2010-05-23 (mesma data/hora da R3 vs Internacional)
+    3130: "2010-05-30",
+}
+
 
 def limpar_texto(valor: Any) -> str | None:
     """Remove espaços extras/NBSP, trata vazios e corrige mojibake UTF-8/Latin-1."""
@@ -177,8 +193,49 @@ def calcular_temporada(datas: pd.Series) -> pd.Series:
     return temporadas.astype(int)
 
 
+def aplicar_correcoes_datas_df(sp: pd.DataFrame) -> pd.Series:
+    """
+    Aplica o dicionário explícito `CORRECOES_DATAS_POR_ID` sobre a série `dt`,
+    mantendo os arquivos brutos em `data/raw/` intactos.
+    """
+    datas_corrigidas = sp["dt"].copy()
+    ids_int = sp["ID"].astype(int)
+    for partida_id, data_corrigida in CORRECOES_DATAS_POR_ID.items():
+        mascara = ids_int == partida_id
+        if mascara.any():
+            datas_corrigidas.loc[mascara] = pd.Timestamp(data_corrigida)
+    return datas_corrigidas
+
+
+def aplicar_correcoes_datas_partidas(
+    partidas: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """
+    Aplica `CORRECOES_DATAS_POR_ID` em uma lista de partidas no schema JSON v1 e
+    reordena cronologicamente por `(temporada, data, id)`.
+    """
+    alteradas = 0
+    atualizadas: list[dict[str, Any]] = []
+    for partida in partidas:
+        registro = dict(partida)
+        partida_id = int(registro["id"])
+        nova_data = CORRECOES_DATAS_POR_ID.get(partida_id)
+        if nova_data is not None and registro.get("data") != nova_data:
+            registro["data"] = nova_data
+            alteradas += 1
+        atualizadas.append(registro)
+
+    atualizadas.sort(key=lambda p: (int(p["temporada"]), str(p["data"]), int(p["id"])))
+    return atualizadas, alteradas
+
+
 def validar_arquivos_entrada() -> None:
-    """Garante que os CSVs originais existam em `data/raw/`."""
+    """Garante que o Pandas esteja disponível e os CSVs originais existam em `data/raw/`."""
+    if pd is None:
+        raise ModuleNotFoundError(
+            "O pacote 'pandas' é necessário para processar os CSVs em data/raw/. "
+            "Instale com: pip install pandas"
+        )
     obrigatorios = [
         ARQUIVO_PARTIDAS,
         ARQUIVO_CARTOES,
@@ -202,6 +259,8 @@ def carregar_partidas_spfc() -> pd.DataFrame:
     sp = df.loc[mascara_spfc].copy()
 
     sp["dt"] = pd.to_datetime(sp["data"], format="%d/%m/%Y")
+    # Aplica correções documentadas de datas incorretas no CSV original antes de calcular temporada e ordenar
+    sp["dt"] = aplicar_correcoes_datas_df(sp)
     sp["temporada"] = calcular_temporada(sp["dt"])
     sp = sp[sp["temporada"].between(TEMPORADA_INICIO, TEMPORADA_FIM)].copy()
 
@@ -492,10 +551,114 @@ def montar_dataset() -> dict[str, Any]:
 
 
 def salvar_json(payload: dict[str, Any], destino: Path = OUTPUT_PATH) -> None:
-    """Exporta o dataset limpo em UTF-8 garantindo JSON estritamente válido."""
+    """Exporta o dataset limpo em UTF-8 garantindo JSON estritamente válido (escrita atômica)."""
     destino.parent.mkdir(parents=True, exist_ok=True)
-    with destino.open("w", encoding="utf-8") as arquivo:
-        json.dump(payload, arquivo, ensure_ascii=False, indent=2, allow_nan=False)
+    tmp_path = destino.with_suffix(destino.suffix + ".tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as arquivo:
+            json.dump(payload, arquivo, ensure_ascii=False, indent=2, allow_nan=False)
+            arquivo.write("\n")
+        os.replace(tmp_path, destino)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+
+
+def sincronizar_producao_com_historico(
+    historico_payload: dict[str, Any],
+    destino_historico: Path = HISTORICO_PATH,
+    destino_producao: Path = OUTPUT_PATH,
+) -> dict[str, Any]:
+    """
+    Salva a base histórica congelada (`data/historico_2003_2025.json`) e regenera
+    `docs/data/spfc_pontos_corridos.json` preservando eventuais partidas de temporadas
+    posteriores (ex.: 2026+ importadas pela API ESPN) em ordem cronológica estrita.
+    """
+    salvar_json(historico_payload, destino_historico)
+
+    partidas_historicas = historico_payload["partidas"]
+    temp_fim_hist = int(historico_payload["metadata"]["temporada_fim"])
+
+    partidas_posteriores: list[dict[str, Any]] = []
+    meta_producao_existente: dict[str, Any] = {}
+    if destino_producao.exists():
+        with destino_producao.open("r", encoding="utf-8") as arquivo:
+            prod_atual = json.load(arquivo)
+        if isinstance(prod_atual, dict) and isinstance(prod_atual.get("partidas"), list):
+            partidas_posteriores = [
+                p for p in prod_atual["partidas"] if int(p["temporada"]) > temp_fim_hist
+            ]
+            meta_producao_existente = dict(prod_atual.get("metadata") or {})
+
+    if not partidas_posteriores:
+        salvar_json(historico_payload, destino_producao)
+        return historico_payload
+
+    todas_partidas = sorted(
+        partidas_historicas + partidas_posteriores,
+        key=lambda p: (int(p["temporada"]), str(p["data"]), int(p["id"])),
+    )
+
+    temporadas_cartoes = sorted(
+        {
+            p["temporada"]
+            for p in todas_partidas
+            if p.get("cartoes_amarelos") is not None and p.get("cartoes_vermelhos") is not None
+        }
+    )
+    temporadas_gols = sorted(
+        {p["temporada"] for p in todas_partidas if isinstance(p.get("gols"), list)}
+    )
+    temporadas_stats = sorted(
+        {p["temporada"] for p in todas_partidas if p.get("chutes") is not None}
+    )
+
+    meta_prod = dict(meta_producao_existente or historico_payload["metadata"])
+    meta_prod.update(
+        {
+            "temporada_inicio": min(p["temporada"] for p in todas_partidas),
+            "temporada_fim": max(p["temporada"] for p in todas_partidas),
+            "total_partidas": len(todas_partidas),
+            "temporadas_com_cartoes": temporadas_cartoes,
+            "temporadas_com_gols": temporadas_gols,
+            "temporadas_com_estatisticas": temporadas_stats,
+            "gerado_em": historico_payload["metadata"]["gerado_em"],
+        }
+    )
+
+    payload_producao = {"metadata": meta_prod, "partidas": todas_partidas}
+    salvar_json(payload_producao, destino_producao)
+    return payload_producao
+
+
+def aplicar_patch_datas_base_existente() -> dict[str, Any]:
+    """
+    Aplica `CORRECOES_DATAS_POR_ID` e reordenação cronológica diretamente sobre a
+    base histórica congelada (`data/historico_2003_2025.json`) e sincroniza o
+    arquivo final de produção (`docs/data/spfc_pontos_corridos.json`), sem exigir
+    os CSVs brutos do Kaggle (ignorados no `.gitignore`).
+    """
+    if not HISTORICO_PATH.exists():
+        raise FileNotFoundError(
+            f"Base histórica congelada não encontrada em '{HISTORICO_PATH}'."
+        )
+
+    with HISTORICO_PATH.open("r", encoding="utf-8") as arquivo:
+        historico_payload = json.load(arquivo)
+
+    partidas_corrigidas, qtd_alteradas = aplicar_correcoes_datas_partidas(
+        historico_payload["partidas"]
+    )
+    historico_payload["partidas"] = partidas_corrigidas
+    historico_payload["metadata"]["gerado_em"] = datetime.now(timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+    print(
+        f"[PATCH] Correções de datas aplicadas via CORRECOES_DATAS_POR_ID: "
+        f"{qtd_alteradas} partida(s) atualizada(s) e reordenadas cronologicamente."
+    )
+    return sincronizar_producao_com_historico(historico_payload)
 
 
 def exibir_resumo(payload: dict[str, Any]) -> None:
@@ -551,8 +714,25 @@ def exibir_resumo(payload: dict[str, Any]) -> None:
 
 
 def main() -> None:
-    payload = montar_dataset()
-    salvar_json(payload)
+    parser = argparse.ArgumentParser(
+        description="ETL histórico do Dados Tricolor (2003–2025)."
+    )
+    parser.add_argument(
+        "--patch-json",
+        action="store_true",
+        help=(
+            "Aplica CORRECOES_DATAS_POR_ID e reordenação cronológica diretamente sobre "
+            "data/historico_2003_2025.json e sincroniza docs/data/spfc_pontos_corridos.json "
+            "sem precisar dos CSVs brutos em data/raw/."
+        ),
+    )
+    args = parser.parse_args()
+
+    if args.patch_json:
+        payload = aplicar_patch_datas_base_existente()
+    else:
+        historico_payload = montar_dataset()
+        payload = sincronizar_producao_com_historico(historico_payload)
     exibir_resumo(payload)
 
 

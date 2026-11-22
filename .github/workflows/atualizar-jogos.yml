@@ -34,6 +34,9 @@ jobs:
       - name: Executar atualização incremental (ESPN)
         run: python etl/atualizar_temporada.py
 
+      - name: Quality Gate — Validar qualidade dos dados (pytest)
+        run: pytest -v
+
       - name: Commit e push se houver alterações em docs/data/
         run: |
           if [ -n "$(git status --porcelain docs/data/)" ]; then
