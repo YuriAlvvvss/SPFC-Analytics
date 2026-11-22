@@ -125,6 +125,12 @@
       "kpi-red-total",
       "kpi-red-avg",
       "kpi-cards-coverage",
+      "records-section",
+      "records-section-subtitle",
+      "records-scope-badge",
+      "records-empty",
+      "records-empty-text",
+      "records-grid",
       "evolution-title",
       "evolution-subtitle",
       "btn-back-all-seasons",
@@ -195,11 +201,70 @@
     return fmtInt.format(value);
   }
 
+  const MONTHS_PT_SHORT = [
+    "jan",
+    "fev",
+    "mar",
+    "abr",
+    "mai",
+    "jun",
+    "jul",
+    "ago",
+    "set",
+    "out",
+    "nov",
+    "dez",
+  ];
+
+  function parseIsoDateParts(isoDate) {
+    if (typeof isoDate !== "string") return null;
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate.trim());
+    if (!match) return null;
+    const monthNum = Number(match[2]);
+    if (monthNum < 1 || monthNum > 12) return null;
+    return {
+      year: match[1],
+      month: match[2],
+      monthNum,
+      day: match[3],
+    };
+  }
+
   function formatDateBR(isoDate) {
     if (!isoDate || typeof isoDate !== "string") return "—";
+    const parts = parseIsoDateParts(isoDate);
+    if (parts) return `${parts.day}/${parts.month}/${parts.year}`;
     const [year, month, day] = isoDate.split("-");
     if (!year || !month || !day) return isoDate;
     return `${day}/${month}/${year}`;
+  }
+
+  function formatMonthYearBR(isoDate) {
+    const parts = parseIsoDateParts(isoDate);
+    if (!parts) return formatDateBR(isoDate);
+    return `${MONTHS_PT_SHORT[parts.monthNum - 1]}/${parts.year}`;
+  }
+
+  function formatStreakPeriodBR(startIso, endIso, count) {
+    if (!startIso) return "—";
+    if (count <= 1 || !endIso || startIso === endIso) {
+      return formatDateBR(startIso);
+    }
+    const startMY = formatMonthYearBR(startIso);
+    const endMY = formatMonthYearBR(endIso);
+    if (startMY === endMY) {
+      const s = parseIsoDateParts(startIso);
+      const e = parseIsoDateParts(endIso);
+      if (s && e) {
+        return `${s.day}/${s.month} – ${e.day}/${e.month}/${e.year}`;
+      }
+      return startMY;
+    }
+    return `${startMY} – ${endMY}`;
+  }
+
+  function pluralizar(quantidade, singular, plural) {
+    return quantidade === 1 ? singular : plural;
   }
 
   function normalizeText(value) {
@@ -685,6 +750,715 @@
         dom["kpi-cards-coverage"].textContent = `Média em ${fmtInt.format(s.cardGames)} ${labelJogos} (${modernStart}–${maxSeason})`;
       }
     }
+  }
+
+  // =========================================================================
+  // Recordes e Sequências (Streaks) — Cálculo Puro e Renderização Segura
+  // =========================================================================
+
+  function compareNormalizedMatchesAsc(a, b) {
+    if (a.data !== b.data) return a.data < b.data ? -1 : 1;
+    if (a.temporada !== b.temporada) return a.temporada - b.temporada;
+    if (a.rodada !== b.rodada) return a.rodada - b.rodada;
+    return a.id - b.id;
+  }
+
+  function findLongestStreak(sortedMatches, predicate) {
+    let bestLen = 0;
+    let bestStart = null;
+    let bestEnd = null;
+    let occurrences = 0;
+
+    let curLen = 0;
+    let curStart = null;
+
+    const closeStreak = (endMatch) => {
+      if (curLen <= 0 || !curStart || !endMatch) return;
+      if (curLen > bestLen) {
+        bestLen = curLen;
+        bestStart = curStart;
+        bestEnd = endMatch;
+        occurrences = 1;
+      } else if (curLen === bestLen) {
+        // Critério de desempate: manter a sequência mais recente
+        bestStart = curStart;
+        bestEnd = endMatch;
+        occurrences += 1;
+      }
+    };
+
+    for (let i = 0; i < sortedMatches.length; i += 1) {
+      const m = sortedMatches[i];
+      if (predicate(m)) {
+        if (curLen === 0) curStart = m;
+        curLen += 1;
+      } else {
+        if (curLen > 0) {
+          closeStreak(sortedMatches[i - 1]);
+          curLen = 0;
+          curStart = null;
+        }
+      }
+    }
+
+    if (curLen > 0) {
+      closeStreak(sortedMatches[sortedMatches.length - 1]);
+    }
+
+    if (bestLen === 0 || !bestStart || !bestEnd) {
+      return null;
+    }
+
+    return {
+      quantidade: bestLen,
+      dataInicio: bestStart.data,
+      dataFim: bestEnd.data,
+      periodoFormatado: formatStreakPeriodBR(bestStart.data, bestEnd.data, bestLen),
+      ocorrencias: occurrences,
+      empatesAdicionais: Math.max(0, occurrences - 1),
+    };
+  }
+
+  function computeRecentStreak(sortedMatches) {
+    const n = sortedMatches.length;
+    if (n === 0) return null;
+
+    let winStreak = 0;
+    for (let i = n - 1; i >= 0 && sortedMatches[i].resultado === "V"; i -= 1) {
+      winStreak += 1;
+    }
+
+    let unbeatenStreak = 0;
+    for (
+      let i = n - 1;
+      i >= 0 && (sortedMatches[i].resultado === "V" || sortedMatches[i].resultado === "E");
+      i -= 1
+    ) {
+      unbeatenStreak += 1;
+    }
+
+    let lossStreak = 0;
+    for (let i = n - 1; i >= 0 && sortedMatches[i].resultado === "D"; i -= 1) {
+      lossStreak += 1;
+    }
+
+    let winlessStreak = 0;
+    for (
+      let i = n - 1;
+      i >= 0 && (sortedMatches[i].resultado === "E" || sortedMatches[i].resultado === "D");
+      i -= 1
+    ) {
+      winlessStreak += 1;
+    }
+
+    let drawStreak = 0;
+    for (let i = n - 1; i >= 0 && sortedMatches[i].resultado === "E"; i -= 1) {
+      drawStreak += 1;
+    }
+
+    const last = sortedMatches[n - 1];
+    const ultimoPlacar = `${last.golsPro}×${last.golsContra}`;
+    const ultimoResumo = `${last.resultado} ${ultimoPlacar} vs ${last.adversario}`;
+
+    if (last.resultado === "V") {
+      if (winStreak >= 2) {
+        const startMatch = sortedMatches[n - winStreak];
+        const periodo = formatStreakPeriodBR(startMatch.data, last.data, winStreak);
+        const extraInvicto =
+          unbeatenStreak > winStreak
+            ? `${fmtInt.format(unbeatenStreak)} ${pluralizar(unbeatenStreak, "jogo", "jogos")} invicto`
+            : `Último: ${ultimoResumo}`;
+        return {
+          tipo: "vitorias",
+          tom: "positivo",
+          badge: "Em alta",
+          quantidade: winStreak,
+          rotuloPrincipal: `${fmtInt.format(winStreak)} ${pluralizar(winStreak, "vitória seguida", "vitórias seguidas")}`,
+          periodoFormatado: periodo,
+          detalhe: `${periodo} · ${extraInvicto}`,
+          dataInicio: startMatch.data,
+          dataFim: last.data,
+        };
+      }
+
+      if (unbeatenStreak >= 2) {
+        const startMatch = sortedMatches[n - unbeatenStreak];
+        const periodo = formatStreakPeriodBR(startMatch.data, last.data, unbeatenStreak);
+        return {
+          tipo: "invencibilidade",
+          tom: "positivo",
+          badge: "Invicto",
+          quantidade: unbeatenStreak,
+          rotuloPrincipal: `${fmtInt.format(unbeatenStreak)} ${pluralizar(unbeatenStreak, "jogo invicto", "jogos invicto")}`,
+          periodoFormatado: periodo,
+          detalhe: `${periodo} · Último: ${ultimoResumo}`,
+          dataInicio: startMatch.data,
+          dataFim: last.data,
+        };
+      }
+
+      const dataFmt = formatDateBR(last.data);
+      return {
+        tipo: "vitorias",
+        tom: "positivo",
+        badge: "Vitória",
+        quantidade: 1,
+        rotuloPrincipal: "1 vitória",
+        periodoFormatado: dataFmt,
+        detalhe: `${dataFmt} · ${ultimoPlacar} vs ${last.adversario}`,
+        dataInicio: last.data,
+        dataFim: last.data,
+      };
+    }
+
+    if (last.resultado === "D") {
+      if (lossStreak >= 2) {
+        const startMatch = sortedMatches[n - lossStreak];
+        const periodo = formatStreakPeriodBR(startMatch.data, last.data, lossStreak);
+        const extraJejum =
+          winlessStreak > lossStreak
+            ? `${fmtInt.format(winlessStreak)} ${pluralizar(winlessStreak, "jogo", "jogos")} sem vencer`
+            : `Último: ${ultimoResumo}`;
+        return {
+          tipo: "derrotas",
+          tom: "negativo",
+          badge: "Derrotas",
+          quantidade: lossStreak,
+          rotuloPrincipal: `${fmtInt.format(lossStreak)} ${pluralizar(lossStreak, "derrota seguida", "derrotas seguidas")}`,
+          periodoFormatado: periodo,
+          detalhe: `${periodo} · ${extraJejum}`,
+          dataInicio: startMatch.data,
+          dataFim: last.data,
+        };
+      }
+
+      if (winlessStreak >= 2) {
+        const startMatch = sortedMatches[n - winlessStreak];
+        const periodo = formatStreakPeriodBR(startMatch.data, last.data, winlessStreak);
+        return {
+          tipo: "jejum",
+          tom: "negativo",
+          badge: "Sem vencer",
+          quantidade: winlessStreak,
+          rotuloPrincipal: `${fmtInt.format(winlessStreak)} ${pluralizar(winlessStreak, "jogo sem vencer", "jogos sem vencer")}`,
+          periodoFormatado: periodo,
+          detalhe: `${periodo} · Último: ${ultimoResumo}`,
+          dataInicio: startMatch.data,
+          dataFim: last.data,
+        };
+      }
+
+      const dataFmt = formatDateBR(last.data);
+      return {
+        tipo: "derrotas",
+        tom: "negativo",
+        badge: "Derrota",
+        quantidade: 1,
+        rotuloPrincipal: "1 derrota",
+        periodoFormatado: dataFmt,
+        detalhe: `${dataFmt} · ${ultimoPlacar} vs ${last.adversario}`,
+        dataInicio: last.data,
+        dataFim: last.data,
+      };
+    }
+
+    // Último jogo foi Empate (E)
+    if (winlessStreak >= 2) {
+      const startMatch = sortedMatches[n - winlessStreak];
+      const periodo = formatStreakPeriodBR(startMatch.data, last.data, winlessStreak);
+      const detalheExtra =
+        drawStreak === winlessStreak
+          ? `${fmtInt.format(drawStreak)} ${pluralizar(drawStreak, "empate seguido", "empates seguidos")}`
+          : `Último: ${ultimoResumo}`;
+      return {
+        tipo: "jejum",
+        tom: "negativo",
+        badge: "Sem vencer",
+        quantidade: winlessStreak,
+        rotuloPrincipal: `${fmtInt.format(winlessStreak)} ${pluralizar(winlessStreak, "jogo sem vencer", "jogos sem vencer")}`,
+        periodoFormatado: periodo,
+        detalhe: `${periodo} · ${detalheExtra}`,
+        dataInicio: startMatch.data,
+        dataFim: last.data,
+      };
+    }
+
+    if (unbeatenStreak >= 2) {
+      const startMatch = sortedMatches[n - unbeatenStreak];
+      const periodo = formatStreakPeriodBR(startMatch.data, last.data, unbeatenStreak);
+      return {
+        tipo: "invencibilidade",
+        tom: "neutro",
+        badge: "Invicto",
+        quantidade: unbeatenStreak,
+        rotuloPrincipal: `${fmtInt.format(unbeatenStreak)} ${pluralizar(unbeatenStreak, "jogo invicto", "jogos invicto")}`,
+        periodoFormatado: periodo,
+        detalhe: `${periodo} · Último: ${ultimoResumo}`,
+        dataInicio: startMatch.data,
+        dataFim: last.data,
+      };
+    }
+
+    const dataFmt = formatDateBR(last.data);
+    return {
+      tipo: "empate",
+      tom: "neutro",
+      badge: "Empate",
+      quantidade: 1,
+      rotuloPrincipal: "1 jogo sem vencer",
+      periodoFormatado: dataFmt,
+      detalhe: `${dataFmt} · Empate ${ultimoPlacar} vs ${last.adversario}`,
+      dataInicio: last.data,
+      dataFim: last.data,
+    };
+  }
+
+  function formatScoreRecord(match) {
+    if (!match) return null;
+    return {
+      golsPro: match.golsPro,
+      golsContra: match.golsContra,
+      saldo: match.saldo,
+      placarSpfc: `SPFC ${match.golsPro} × ${match.golsContra}`,
+      adversario: match.adversario,
+      mando: match.mando,
+      data: match.data,
+      dataFormatada: formatDateBR(match.data),
+      temporada: match.temporada || null,
+      rodada: match.rodada || null,
+      arena: match.arena,
+    };
+  }
+
+  /**
+   * Função pura: calcula recordes e sequências (streaks) sem mutar o array de entrada.
+   * Garante ordenação cronológica crescente, ignora placares inválidos e evita bugs de fuso horário.
+   */
+  function calcularRecordesESequencias(jogosFiltrados) {
+    const entrada = Array.isArray(jogosFiltrados) ? [...jogosFiltrados] : [];
+    const jogosValidos = [];
+
+    for (const jogo of entrada) {
+      if (!jogo || typeof jogo !== "object") continue;
+      const gp = jogo.gols_pro;
+      const gc = jogo.gols_contra;
+      if (typeof gp !== "number" || !Number.isFinite(gp)) continue;
+      if (typeof gc !== "number" || !Number.isFinite(gc)) continue;
+
+      const saldo = gp - gc;
+      const resultado = saldo > 0 ? "V" : saldo < 0 ? "D" : "E";
+      jogosValidos.push({
+        id: typeof jogo.id === "number" && Number.isFinite(jogo.id) ? jogo.id : 0,
+        temporada: typeof jogo.temporada === "number" && Number.isFinite(jogo.temporada) ? jogo.temporada : 0,
+        rodada: typeof jogo.rodada === "number" && Number.isFinite(jogo.rodada) ? jogo.rodada : 0,
+        data: typeof jogo.data === "string" ? jogo.data.trim() : "",
+        adversario:
+          typeof jogo.adversario === "string" && jogo.adversario.trim()
+            ? jogo.adversario.trim()
+            : "Adversário desconhecido",
+        mando: typeof jogo.mando === "string" ? jogo.mando.trim() : "",
+        arena: typeof jogo.arena === "string" ? jogo.arena.trim() : "",
+        golsPro: gp,
+        golsContra: gc,
+        saldo,
+        resultado,
+      });
+    }
+
+    if (jogosValidos.length === 0) {
+      return {
+        totalJogosValidos: 0,
+        vazio: true,
+        maiorInvencibilidade: null,
+        maiorSequenciaVitorias: null,
+        maiorJejumSemVencer: null,
+        sequenciaRecente: null,
+        maiorGoleadaAFavor: null,
+        piorDerrota: null,
+      };
+    }
+
+    jogosValidos.sort(compareNormalizedMatchesAsc);
+
+    const maiorInvencibilidade = findLongestStreak(
+      jogosValidos,
+      (m) => m.resultado === "V" || m.resultado === "E"
+    );
+    const maiorSequenciaVitorias = findLongestStreak(jogosValidos, (m) => m.resultado === "V");
+    const maiorJejumSemVencer = findLongestStreak(
+      jogosValidos,
+      (m) => m.resultado === "E" || m.resultado === "D"
+    );
+    const sequenciaRecente = computeRecentStreak(jogosValidos);
+
+    // Maior Goleada a Favor: apenas vitórias (saldo > 0)
+    // Desempate: maior saldo -> mais gols pró -> data mais recente
+    let bestWin = null;
+    for (const m of jogosValidos) {
+      if (m.saldo <= 0) continue;
+      if (
+        !bestWin ||
+        m.saldo > bestWin.saldo ||
+        (m.saldo === bestWin.saldo && m.golsPro > bestWin.golsPro) ||
+        (m.saldo === bestWin.saldo &&
+          m.golsPro === bestWin.golsPro &&
+          compareNormalizedMatchesAsc(m, bestWin) > 0)
+      ) {
+        bestWin = m;
+      }
+    }
+
+    // Pior Derrota: apenas derrotas (saldo < 0)
+    // Desempate: pior saldo -> mais gols sofridos -> data mais recente
+    let worstLoss = null;
+    for (const m of jogosValidos) {
+      if (m.saldo >= 0) continue;
+      if (
+        !worstLoss ||
+        m.saldo < worstLoss.saldo ||
+        (m.saldo === worstLoss.saldo && m.golsContra > worstLoss.golsContra) ||
+        (m.saldo === worstLoss.saldo &&
+          m.golsContra === worstLoss.golsContra &&
+          compareNormalizedMatchesAsc(m, worstLoss) > 0)
+      ) {
+        worstLoss = m;
+      }
+    }
+
+    return {
+      totalJogosValidos: jogosValidos.length,
+      vazio: false,
+      maiorInvencibilidade,
+      maiorSequenciaVitorias,
+      maiorJejumSemVencer,
+      sequenciaRecente,
+      maiorGoleadaAFavor: formatScoreRecord(bestWin),
+      piorDerrota: formatScoreRecord(worstLoss),
+    };
+  }
+
+  const RECORD_ICON_PATHS = {
+    shield: "M12 3l7 3v5c0 4.5-3 8.2-7 9.5C8 19.2 5 15.5 5 11V6l7-3z",
+    flame: "M13 3L4 14h6l-1 7 9-11h-6l1-7z",
+    clock: "M12 7v5l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z",
+    pulse: "M3 12h4l2.5-6 4 12 2.5-6H21",
+    trophy: "M8 21h8M12 17v4M6 4h12v4a6 6 0 0 1-12 0V4zM6 6H4a2 2 0 0 0 0 4h2M18 6h2a2 2 0 0 1 0 4h-2",
+    alert: "M12 9v4M12 17h.01M10.3 3.9L1.8 18.5A2 2 0 0 0 3.5 21h17a2 2 0 0 0 1.7-2.5L13.7 3.9a2 2 0 0 0-3.4 0z",
+  };
+
+  function createRecordIcon(iconKey, toneClass) {
+    const svgNs = "http://www.w3.org/2000/svg";
+    const wrap = document.createElement("span");
+    wrap.className = `record-icon${toneClass ? ` record-icon--${toneClass}` : ""}`;
+    wrap.setAttribute("aria-hidden", "true");
+
+    const svg = document.createElementNS(svgNs, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("width", "13");
+    svg.setAttribute("height", "13");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2.2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+
+    const path = document.createElementNS(svgNs, "path");
+    path.setAttribute("d", RECORD_ICON_PATHS[iconKey] || RECORD_ICON_PATHS.pulse);
+    svg.appendChild(path);
+    wrap.appendChild(svg);
+    return wrap;
+  }
+
+  function createRecordCard({
+    title,
+    icon,
+    tone = "neutral", // "positive" | "negative" | "neutral" | "empty"
+    badgeText = "",
+    valueText = "—",
+    compactValue = false,
+    isEmptyValue = false,
+    metaText = "",
+    opponentName = "",
+    metaSuffix = "",
+    tieCount = 0,
+  }) {
+    const card = document.createElement("article");
+    card.className = `record-card record-card--${tone}`;
+
+    const head = document.createElement("div");
+    head.className = "record-card-head";
+
+    const titleWrap = document.createElement("div");
+    titleWrap.className = "record-title-wrap";
+    const iconTone = tone === "empty" ? "" : tone;
+    titleWrap.appendChild(createRecordIcon(icon, iconTone));
+
+    const titleEl = document.createElement("span");
+    titleEl.className = "record-title";
+    titleEl.textContent = title;
+    titleWrap.appendChild(titleEl);
+    head.appendChild(titleWrap);
+
+    if (badgeText) {
+      const badgeEl = document.createElement("span");
+      const badgeToneClass =
+        tone === "positive" || tone === "negative" || tone === "neutral"
+          ? ` record-badge--${tone}`
+          : "";
+      badgeEl.className = `record-badge${badgeToneClass}`;
+      badgeEl.textContent = badgeText;
+      head.appendChild(badgeEl);
+    }
+
+    const valueEl = document.createElement("div");
+    valueEl.className =
+      `record-value${compactValue ? " record-value--compact" : ""}${isEmptyValue ? " record-value--muted" : ""}`;
+    valueEl.textContent = valueText;
+
+    const metaEl = document.createElement("p");
+    metaEl.className = "record-meta";
+
+    if (opponentName) {
+      const textWrap = document.createElement("span");
+      textWrap.appendChild(document.createTextNode("vs "));
+
+      const oppEl = document.createElement("span");
+      oppEl.className = "record-opponent";
+      oppEl.textContent = opponentName;
+      textWrap.appendChild(oppEl);
+
+      if (metaSuffix) {
+        textWrap.appendChild(document.createTextNode(` · ${metaSuffix}`));
+      }
+      metaEl.appendChild(textWrap);
+    } else {
+      const textEl = document.createElement("span");
+      textEl.textContent = metaText;
+      metaEl.appendChild(textEl);
+    }
+
+    if (tieCount > 0) {
+      const tieEl = document.createElement("span");
+      tieEl.className = "record-tie-pill";
+      tieEl.textContent = `+${fmtInt.format(tieCount)} ${pluralizar(tieCount, "outra vez", "outras vezes")}`;
+      tieEl.title = `Marca igualada em ${fmtInt.format(tieCount + 1)} ocasiões; exibindo a mais recente`;
+      metaEl.appendChild(tieEl);
+    }
+
+    card.appendChild(head);
+    card.appendChild(valueEl);
+    card.appendChild(metaEl);
+    return card;
+  }
+
+  function renderRecordsAndStreaks(matches) {
+    const gridEl = dom["records-grid"];
+    const emptyEl = dom["records-empty"];
+    const emptyTextEl = dom["records-empty-text"];
+    const scopeBadgeEl = dom["records-scope-badge"];
+    if (!gridEl || !emptyEl) return;
+
+    const rec = calcularRecordesESequencias(matches);
+
+    if (scopeBadgeEl) {
+      scopeBadgeEl.textContent = `${fmtInt.format(rec.totalJogosValidos)} ${pluralizar(rec.totalJogosValidos, "jogo analisado", "jogos analisados")}`;
+    }
+
+    if (rec.vazio) {
+      gridEl.replaceChildren();
+      gridEl.classList.add("is-hidden");
+      emptyEl.classList.remove("is-hidden");
+      if (emptyTextEl) {
+        emptyTextEl.textContent = "Nenhum jogo encontrado para os filtros selecionados.";
+      }
+      return;
+    }
+
+    emptyEl.classList.add("is-hidden");
+    gridEl.classList.remove("is-hidden");
+
+    const toneMap = {
+      positivo: "positive",
+      negativo: "negative",
+      neutro: "neutral",
+    };
+
+    const cards = [];
+
+    // 1. Maior Invencibilidade
+    if (rec.maiorInvencibilidade) {
+      const s = rec.maiorInvencibilidade;
+      cards.push(
+        createRecordCard({
+          title: "Maior Invencibilidade",
+          icon: "shield",
+          tone: "positive",
+          badgeText: "Sem perder",
+          valueText: `${fmtInt.format(s.quantidade)} ${pluralizar(s.quantidade, "jogo", "jogos")}`,
+          metaText: s.periodoFormatado,
+          tieCount: s.empatesAdicionais,
+        })
+      );
+    } else {
+      cards.push(
+        createRecordCard({
+          title: "Maior Invencibilidade",
+          icon: "shield",
+          tone: "empty",
+          badgeText: "0 jogos",
+          valueText: "—",
+          isEmptyValue: true,
+          metaText: "Apenas derrotas no recorte",
+        })
+      );
+    }
+
+    // 2. Maior Sequência de Vitórias
+    if (rec.maiorSequenciaVitorias) {
+      const s = rec.maiorSequenciaVitorias;
+      cards.push(
+        createRecordCard({
+          title: "Maior Sequência de Vitórias",
+          icon: "flame",
+          tone: "positive",
+          badgeText: "Vitórias",
+          valueText: `${fmtInt.format(s.quantidade)} ${pluralizar(s.quantidade, "vitória", "vitórias")}`,
+          metaText: s.periodoFormatado,
+          tieCount: s.empatesAdicionais,
+        })
+      );
+    } else {
+      cards.push(
+        createRecordCard({
+          title: "Maior Sequência de Vitórias",
+          icon: "flame",
+          tone: "empty",
+          badgeText: "0 vitórias",
+          valueText: "—",
+          isEmptyValue: true,
+          metaText: "Sem vitórias no recorte",
+        })
+      );
+    }
+
+    // 3. Maior Jejum sem Vencer
+    if (rec.maiorJejumSemVencer) {
+      const s = rec.maiorJejumSemVencer;
+      cards.push(
+        createRecordCard({
+          title: "Maior Jejum sem Vencer",
+          icon: "clock",
+          tone: "negative",
+          badgeText: "Sem vitórias",
+          valueText: `${fmtInt.format(s.quantidade)} ${pluralizar(s.quantidade, "jogo", "jogos")}`,
+          metaText: s.periodoFormatado,
+          tieCount: s.empatesAdicionais,
+        })
+      );
+    } else {
+      cards.push(
+        createRecordCard({
+          title: "Maior Jejum sem Vencer",
+          icon: "clock",
+          tone: "empty",
+          badgeText: "0 jejum",
+          valueText: "—",
+          isEmptyValue: true,
+          metaText: "Nenhum jejum no recorte",
+        })
+      );
+    }
+
+    // 4. Sequência Recente (fim do recorte)
+    if (rec.sequenciaRecente) {
+      const r = rec.sequenciaRecente;
+      cards.push(
+        createRecordCard({
+          title: "Sequência Recente",
+          icon: "pulse",
+          tone: toneMap[r.tom] || "neutral",
+          badgeText: r.badge,
+          valueText: r.rotuloPrincipal,
+          compactValue: true,
+          metaText: r.detalhe,
+        })
+      );
+    } else {
+      cards.push(
+        createRecordCard({
+          title: "Sequência Recente",
+          icon: "pulse",
+          tone: "empty",
+          valueText: "—",
+          isEmptyValue: true,
+          metaText: "Sem partidas no recorte",
+        })
+      );
+    }
+
+    // 5. Maior Goleada a Favor
+    if (rec.maiorGoleadaAFavor) {
+      const g = rec.maiorGoleadaAFavor;
+      const mandoSuffix = g.mando ? ` (${g.mando})` : "";
+      cards.push(
+        createRecordCard({
+          title: "Maior Goleada a Favor",
+          icon: "trophy",
+          tone: "positive",
+          badgeText: `SG ${formatSigned(g.saldo)}`,
+          valueText: g.placarSpfc,
+          opponentName: g.adversario,
+          metaSuffix: `${g.dataFormatada}${mandoSuffix}`,
+        })
+      );
+    } else {
+      cards.push(
+        createRecordCard({
+          title: "Maior Goleada a Favor",
+          icon: "trophy",
+          tone: "empty",
+          badgeText: "0 vitórias",
+          valueText: "—",
+          isEmptyValue: true,
+          metaText: "Sem vitórias no recorte",
+        })
+      );
+    }
+
+    // 6. Pior Derrota
+    if (rec.piorDerrota) {
+      const d = rec.piorDerrota;
+      const mandoSuffix = d.mando ? ` (${d.mando})` : "";
+      cards.push(
+        createRecordCard({
+          title: "Pior Derrota",
+          icon: "alert",
+          tone: "negative",
+          badgeText: `SG ${formatSigned(d.saldo)}`,
+          valueText: d.placarSpfc,
+          opponentName: d.adversario,
+          metaSuffix: `${d.dataFormatada}${mandoSuffix}`,
+        })
+      );
+    } else {
+      cards.push(
+        createRecordCard({
+          title: "Pior Derrota",
+          icon: "alert",
+          tone: "empty",
+          badgeText: "0 derrotas",
+          valueText: "—",
+          isEmptyValue: true,
+          metaText: "Nenhuma derrota no recorte",
+        })
+      );
+    }
+
+    const fragment = document.createDocumentFragment();
+    for (const card of cards) {
+      fragment.appendChild(card);
+    }
+    gridEl.replaceChildren(fragment);
   }
 
   // =========================================================================
@@ -1733,6 +2507,7 @@
     syncFilterControlsUI(filtered.length);
     syncUrlWithState();
     renderKPIs(filtered);
+    renderRecordsAndStreaks(filtered);
     renderEvolutionChart(filtered);
     renderVenueChart(filtered);
     renderScorersChart(filtered);

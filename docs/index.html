@@ -302,6 +302,30 @@
         </article>
       </section>
 
+      <!-- Seção de Recordes e Sequências (Streaks) -->
+      <section class="records-section" id="records-section" aria-labelledby="records-section-title">
+        <div class="records-section-header">
+          <div>
+            <h2 class="records-section-title" id="records-section-title">Recordes e Sequências</h2>
+            <p class="records-section-subtitle" id="records-section-subtitle">
+              Maiores séries históricas, momento recente e placares extremos no recorte filtrado
+            </p>
+          </div>
+          <span class="coverage-badge" id="records-scope-badge">0 jogos analisados</span>
+        </div>
+
+        <div id="records-empty" class="records-empty is-hidden" role="status">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <circle cx="11" cy="11" r="7"/>
+            <path d="M20 20l-3.5-3.5" stroke-linecap="round"/>
+            <path d="M8.5 11h5" stroke-linecap="round"/>
+          </svg>
+          <p id="records-empty-text">Nenhum jogo encontrado para os filtros selecionados.</p>
+        </div>
+
+        <div class="records-grid" id="records-grid"></div>
+      </section>
+
       <!-- Seção de Gráficos -->
       <section class="charts-grid" aria-label="Gráficos interativos">
         <!-- Gráfico 1: Evolução por Temporada / Rodada a Rodada -->
