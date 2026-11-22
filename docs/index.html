@@ -449,6 +449,136 @@
         </article>
       </section>
 
+      <!-- Seção de Comparador de Temporadas Lado a Lado (independente dos filtros globais) -->
+      <section class="comparator-section" id="comparator-section" aria-labelledby="comparator-section-title">
+        <div class="comparator-section-header">
+          <div>
+            <h2 class="records-section-title" id="comparator-section-title">Comparador de Temporadas</h2>
+            <p class="records-section-subtitle">
+              Compare duas campanhas lado a lado em aproveitamento, gols, defesa e evolução acumulada de pontos
+            </p>
+          </div>
+          <span class="coverage-badge" id="comparator-scope-badge" title="O comparador consulta sempre a base histórica completa, independente dos filtros do topo">
+            Base completa · independente do filtro global
+          </span>
+        </div>
+
+        <div class="comparator-card">
+          <!-- Barra de Controles do Comparador -->
+          <div class="comparator-controls" aria-label="Controles do comparador de temporadas">
+            <div class="comparator-selectors">
+              <div class="comparator-select-group comparator-select-group--a">
+                <label class="comparator-select-label" for="comparator-season-a">
+                  <span class="comparator-dot comparator-dot--a" aria-hidden="true"></span>
+                  Temporada A
+                </label>
+                <select id="comparator-season-a" class="control-select comparator-select" aria-label="Selecionar Temporada A"></select>
+              </div>
+
+              <button
+                type="button"
+                id="comparator-swap"
+                class="comparator-swap-btn"
+                title="Inverter Temporada A e Temporada B"
+                aria-label="Inverter Temporada A e Temporada B"
+              >
+                <span class="comparator-swap-icon" aria-hidden="true">⇄</span>
+                <span class="comparator-swap-text">Inverter</span>
+              </button>
+
+              <div class="comparator-select-group comparator-select-group--b">
+                <label class="comparator-select-label" for="comparator-season-b">
+                  <span class="comparator-dot comparator-dot--b" aria-hidden="true"></span>
+                  Temporada B
+                </label>
+                <select id="comparator-season-b" class="control-select comparator-select" aria-label="Selecionar Temporada B"></select>
+              </div>
+            </div>
+
+            <div class="comparator-venue-group">
+              <span class="filter-label">Escopo do comparador</span>
+              <div class="segmented-control comparator-segmented" role="group" aria-label="Filtrar comparador por mando de campo">
+                <button type="button" class="segmented-btn is-active" data-comparator-venue="ALL" aria-pressed="true">
+                  Todos
+                </button>
+                <button type="button" class="segmented-btn" data-comparator-venue="Casa" aria-pressed="false">
+                  Casa
+                </button>
+                <button type="button" class="segmented-btn" data-comparator-venue="Fora" aria-pressed="false">
+                  Fora
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Aviso discreto quando mesma temporada ou número diferente de jogos -->
+          <div id="comparator-notice" class="comparator-notice is-hidden" role="status" aria-live="polite"></div>
+
+          <!-- Cabeçalho com Resumo Rápido das Duas Temporadas -->
+          <div class="comparator-summary-grid" aria-label="Resumo rápido das temporadas selecionadas">
+            <article class="comparator-season-card comparator-season-card--a" id="comparator-card-a">
+              <div class="comparator-season-top">
+                <span class="comparator-side-tag comparator-side-tag--a">Temporada A</span>
+                <span class="comparator-season-games" id="comparator-a-games">0 jogos</span>
+              </div>
+              <div class="comparator-season-heading">
+                <strong class="comparator-season-year" id="comparator-a-year">—</strong>
+                <span class="comparator-title-pill is-hidden" id="comparator-a-title-pill">★ Campeão</span>
+              </div>
+              <p class="comparator-season-quick" id="comparator-a-quick">—</p>
+            </article>
+
+            <div class="comparator-vs-center" aria-live="polite">
+              <span class="comparator-vs-badge" aria-hidden="true">VS</span>
+              <span class="comparator-score-summary" id="comparator-advantage-summary">—</span>
+            </div>
+
+            <article class="comparator-season-card comparator-season-card--b" id="comparator-card-b">
+              <div class="comparator-season-top">
+                <span class="comparator-side-tag comparator-side-tag--b">Temporada B</span>
+                <span class="comparator-season-games" id="comparator-b-games">0 jogos</span>
+              </div>
+              <div class="comparator-season-heading">
+                <strong class="comparator-season-year" id="comparator-b-year">—</strong>
+                <span class="comparator-title-pill is-hidden" id="comparator-b-title-pill">★ Campeão</span>
+              </div>
+              <p class="comparator-season-quick" id="comparator-b-quick">—</p>
+            </article>
+          </div>
+
+          <!-- Grid Comparativo Lado a Lado (3 Colunas: Temporada A | Indicador + Δ | Temporada B) -->
+          <div class="comparator-metrics-panel" role="region" aria-label="Tabela comparativa de indicadores">
+            <div class="comparator-metrics-head" aria-hidden="true">
+              <span class="comparator-col-head comparator-col-head--a" id="comparator-col-a">—</span>
+              <span class="comparator-col-head comparator-col-head--center">Indicador &amp; Δ</span>
+              <span class="comparator-col-head comparator-col-head--b" id="comparator-col-b">—</span>
+            </div>
+            <div class="comparator-metrics-body" id="comparator-metrics-body"></div>
+          </div>
+
+          <!-- Gráfico Comparativo de Evolução (Pontos Acumulados Jogo a Jogo) -->
+          <div class="comparator-chart-block">
+            <div class="comparator-chart-header">
+              <div>
+                <h3 class="comparator-chart-title" id="comparator-chart-title">
+                  Evolução de Pontos Acumulados (Jogo a Jogo)
+                </h3>
+                <p class="comparator-chart-subtitle" id="comparator-chart-subtitle">
+                  Curva de pontuação acumulada em ordem cronológica na campanha
+                </p>
+              </div>
+              <span class="coverage-badge" id="comparator-chart-badge">—</span>
+            </div>
+            <div class="chart-stage chart-stage--medium">
+              <canvas id="chart-comparator"></canvas>
+              <div id="empty-comparator" class="chart-empty is-hidden">
+                <p id="empty-comparator-text">Sem partidas válidas para exibir a evolução comparativa.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- Tabela de Partidas Filtradas -->
       <section class="table-card" aria-label="Tabela de partidas filtradas">
         <div class="table-header">

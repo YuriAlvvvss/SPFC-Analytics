@@ -68,11 +68,19 @@
     tablePageSize: 25,
   };
 
+  // Estado independente do Comparador de Temporadas (sempre consulta allMatches)
+  const comparatorState = {
+    seasonA: null,
+    seasonB: null,
+    venue: "ALL", // "ALL" | "Casa" | "Fora"
+  };
+
   const charts = {
     evolution: null,
     venue: null,
     scorers: null,
     secondary: null,
+    comparator: null,
   };
 
   // Cache de elementos DOM
@@ -155,6 +163,30 @@
       "empty-secondary",
       "empty-secondary-text",
       "btn-jump-modern-cards",
+      "comparator-section",
+      "comparator-scope-badge",
+      "comparator-season-a",
+      "comparator-season-b",
+      "comparator-swap",
+      "comparator-notice",
+      "comparator-a-games",
+      "comparator-a-year",
+      "comparator-a-title-pill",
+      "comparator-a-quick",
+      "comparator-b-games",
+      "comparator-b-year",
+      "comparator-b-title-pill",
+      "comparator-b-quick",
+      "comparator-advantage-summary",
+      "comparator-col-a",
+      "comparator-col-b",
+      "comparator-metrics-body",
+      "comparator-chart-title",
+      "comparator-chart-subtitle",
+      "comparator-chart-badge",
+      "chart-comparator",
+      "empty-comparator",
+      "empty-comparator-text",
       "table-total-badge",
       "table-search",
       "matches-tbody",
@@ -2344,6 +2376,908 @@
   }
 
   // =========================================================================
+  // Comparador de Temporadas Lado a Lado — Funções Puras, UI Segura e Gráfico
+  // =========================================================================
+
+  function normalizarMandoComparador(mando) {
+    if (typeof mando !== "string") return "ALL";
+    const norm = normalizeText(mando);
+    if (norm === "casa") return "Casa";
+    if (norm === "fora") return "Fora";
+    return "ALL";
+  }
+
+  /**
+   * Filtra registros com placar numérico válido e devolve cópia ordenada
+   * cronologicamente crescente (por data ISO, rodada e id), sem mutar a entrada
+   * e sem depender de `new Date("YYYY-MM-DD")`.
+   */
+  function normalizarEOrdenarJogosTemporada(jogos) {
+    if (!Array.isArray(jogos)) return [];
+    const validos = [];
+
+    for (let idx = 0; idx < jogos.length; idx += 1) {
+      const jogo = jogos[idx];
+      if (!jogo || typeof jogo !== "object") continue;
+
+      const gp = jogo.gols_pro;
+      const gc = jogo.gols_contra;
+      if (typeof gp !== "number" || !Number.isFinite(gp) || gp < 0) continue;
+      if (typeof gc !== "number" || !Number.isFinite(gc) || gc < 0) continue;
+
+      const saldo = gp - gc;
+      const resultado = saldo > 0 ? "V" : saldo < 0 ? "D" : "E";
+      const pontos =
+        typeof jogo.pontos === "number" && Number.isFinite(jogo.pontos)
+          ? jogo.pontos
+          : resultado === "V"
+            ? 3
+            : resultado === "E"
+              ? 1
+              : 0;
+
+      validos.push({
+        id: typeof jogo.id === "number" && Number.isFinite(jogo.id) ? jogo.id : idx,
+        temporada:
+          typeof jogo.temporada === "number" && Number.isFinite(jogo.temporada)
+            ? jogo.temporada
+            : null,
+        rodada:
+          typeof jogo.rodada === "number" && Number.isFinite(jogo.rodada) ? jogo.rodada : 0,
+        data: typeof jogo.data === "string" ? jogo.data.trim() : "",
+        mando: typeof jogo.mando === "string" ? jogo.mando.trim() : "",
+        adversario:
+          typeof jogo.adversario === "string" && jogo.adversario.trim()
+            ? jogo.adversario.trim()
+            : "Adversário desconhecido",
+        golsPro: gp,
+        golsContra: gc,
+        saldo,
+        resultado,
+        pontos,
+        _origIdx: idx,
+      });
+    }
+
+    validos.sort((a, b) => {
+      if (a.data !== b.data) {
+        if (!a.data) return 1;
+        if (!b.data) return -1;
+        return a.data < b.data ? -1 : 1;
+      }
+      if (a.rodada !== b.rodada) return a.rodada - b.rodada;
+      if (a.id !== b.id) return a.id - b.id;
+      return a._origIdx - b._origIdx;
+    });
+
+    return validos;
+  }
+
+  /**
+   * Função pura: resume o desempenho de uma temporada a partir de uma lista de jogos.
+   * Protege todas as médias/percentuais contra divisão por zero (nunca produz NaN/Infinity).
+   */
+  function resumirTemporada(jogos) {
+    const ordenados = normalizarEOrdenarJogosTemporada(jogos);
+    const totalJogos = ordenados.length;
+
+    let pontos = 0;
+    let vitorias = 0;
+    let empates = 0;
+    let derrotas = 0;
+    let golsPro = 0;
+    let golsContra = 0;
+    let jogosSemSofrerGol = 0;
+    let jogosCasa = 0;
+    let jogosFora = 0;
+
+    const seriePontosAcumulados = [];
+    const jogosOrdenados = [];
+
+    for (let i = 0; i < ordenados.length; i += 1) {
+      const m = ordenados[i];
+      pontos += m.pontos;
+      if (m.resultado === "V") vitorias += 1;
+      else if (m.resultado === "E") empates += 1;
+      else derrotas += 1;
+
+      golsPro += m.golsPro;
+      golsContra += m.golsContra;
+      if (m.golsContra === 0) jogosSemSofrerGol += 1;
+      if (m.mando === "Casa") jogosCasa += 1;
+      else if (m.mando === "Fora") jogosFora += 1;
+
+      seriePontosAcumulados.push(pontos);
+      jogosOrdenados.push({
+        jogoNumero: i + 1,
+        id: m.id,
+        temporada: m.temporada,
+        rodada: m.rodada,
+        data: m.data,
+        mando: m.mando,
+        adversario: m.adversario,
+        golsPro: m.golsPro,
+        golsContra: m.golsContra,
+        saldo: m.saldo,
+        resultado: m.resultado,
+        pontosJogo: m.pontos,
+        pontosAcumulados: pontos,
+      });
+    }
+
+    const pontosPossiveis = totalJogos * 3;
+    const saldoGols = golsPro - golsContra;
+    const aproveitamento = totalJogos > 0 ? (pontos / pontosPossiveis) * 100 : null;
+    const mediaGolsPro = totalJogos > 0 ? golsPro / totalJogos : null;
+    const mediaGolsContra = totalJogos > 0 ? golsContra / totalJogos : null;
+    const taxaSemSofrerGol = totalJogos > 0 ? (jogosSemSofrerGol / totalJogos) * 100 : null;
+
+    return {
+      jogos: totalJogos,
+      jogosCasa,
+      jogosFora,
+      pontos,
+      pontosPossiveis,
+      aproveitamento,
+      vitorias,
+      empates,
+      derrotas,
+      golsPro,
+      mediaGolsPro,
+      golsContra,
+      mediaGolsContra,
+      saldoGols,
+      jogosSemSofrerGol,
+      taxaSemSofrerGol,
+      seriePontosAcumulados,
+      jogosOrdenados,
+    };
+  }
+
+  function avaliarComparacaoMetrica(valorA, valorB, polaridade, mesmaTemporada, compararPermitido) {
+    if (!compararPermitido || !Number.isFinite(valorA) || !Number.isFinite(valorB)) {
+      return {
+        diferenca: null,
+        diferencaAbsoluta: null,
+        vencedor: "neutral",
+      };
+    }
+
+    if (mesmaTemporada) {
+      return {
+        diferenca: 0,
+        diferencaAbsoluta: 0,
+        vencedor: "neutral",
+      };
+    }
+
+    const diferenca = valorA - valorB;
+    const diferencaAbsoluta = Math.abs(diferenca);
+
+    if (diferencaAbsoluta < 1e-9) {
+      return {
+        diferenca: 0,
+        diferencaAbsoluta: 0,
+        vencedor: polaridade === "neutral" ? "neutral" : "tie",
+      };
+    }
+
+    if (polaridade === "neutral") {
+      return {
+        diferenca,
+        diferencaAbsoluta,
+        vencedor: "neutral",
+      };
+    }
+
+    if (polaridade === "lower") {
+      return {
+        diferenca,
+        diferencaAbsoluta,
+        vencedor: valorA < valorB ? "A" : "B",
+      };
+    }
+
+    return {
+      diferenca,
+      diferencaAbsoluta,
+      vencedor: valorA > valorB ? "A" : "B",
+    };
+  }
+
+  /**
+   * Função pura: compara duas temporadas na base completa sob o mando escolhido
+   * ("ALL" | "Casa" | "Fora"), respeitando polaridade das métricas, estado neutro
+   * em empates / mesma temporada e alinhamento de séries de pontos acumulados com `null`.
+   */
+  function compararTemporadas(dadosCompletos, tempA, tempB, mando = "ALL") {
+    const base = Array.isArray(dadosCompletos) ? dadosCompletos : [];
+    const mandoNormalizado = normalizarMandoComparador(mando);
+    const anoA = Number(tempA);
+    const anoB = Number(tempB);
+    const anoAValido = Number.isFinite(anoA);
+    const anoBValido = Number.isFinite(anoB);
+    const mesmaTemporada = anoAValido && anoBValido && anoA === anoB;
+
+    const jogosA = [];
+    const jogosB = [];
+
+    for (let i = 0; i < base.length; i += 1) {
+      const m = base[i];
+      if (!m || typeof m !== "object") continue;
+      if (mandoNormalizado !== "ALL" && m.mando !== mandoNormalizado) continue;
+      if (anoAValido && m.temporada === anoA) jogosA.push(m);
+      if (anoBValido && m.temporada === anoB) jogosB.push(m);
+    }
+
+    const resumoA = resumirTemporada(jogosA);
+    const resumoB = resumirTemporada(jogosB);
+    const ambosComJogos = resumoA.jogos > 0 && resumoB.jogos > 0;
+
+    const valOuNulo = (resumo, campo) => (resumo.jogos > 0 ? resumo[campo] : null);
+
+    const definicoes = [
+      {
+        chave: "jogos",
+        rotulo: "Jogos disputados",
+        tipo: "int",
+        polaridade: "neutral",
+        valorA: resumoA.jogos,
+        valorB: resumoB.jogos,
+        compararPermitido: true,
+      },
+      {
+        chave: "pontos",
+        rotulo: "Pontos conquistados",
+        tipo: "int",
+        polaridade: "higher",
+        valorA: valOuNulo(resumoA, "pontos"),
+        valorB: valOuNulo(resumoB, "pontos"),
+        compararPermitido: ambosComJogos,
+      },
+      {
+        chave: "aproveitamento",
+        rotulo: "Aproveitamento",
+        tipo: "pct",
+        polaridade: "higher",
+        valorA: resumoA.aproveitamento,
+        valorB: resumoB.aproveitamento,
+        compararPermitido: ambosComJogos,
+      },
+      {
+        chave: "vitorias",
+        rotulo: "Vitórias",
+        tipo: "int",
+        polaridade: "higher",
+        valorA: valOuNulo(resumoA, "vitorias"),
+        valorB: valOuNulo(resumoB, "vitorias"),
+        compararPermitido: ambosComJogos,
+      },
+      {
+        chave: "empates",
+        rotulo: "Empates",
+        tipo: "int",
+        polaridade: "neutral",
+        valorA: valOuNulo(resumoA, "empates"),
+        valorB: valOuNulo(resumoB, "empates"),
+        compararPermitido: ambosComJogos,
+      },
+      {
+        chave: "derrotas",
+        rotulo: "Derrotas",
+        tipo: "int",
+        polaridade: "lower",
+        valorA: valOuNulo(resumoA, "derrotas"),
+        valorB: valOuNulo(resumoB, "derrotas"),
+        compararPermitido: ambosComJogos,
+      },
+      {
+        chave: "golsPro",
+        rotulo: "Gols Pró",
+        tipo: "int",
+        polaridade: "higher",
+        valorA: valOuNulo(resumoA, "golsPro"),
+        valorB: valOuNulo(resumoB, "golsPro"),
+        compararPermitido: ambosComJogos,
+      },
+      {
+        chave: "mediaGolsPro",
+        rotulo: "Média de Gols Pró / jogo",
+        tipo: "dec2",
+        polaridade: "higher",
+        valorA: resumoA.mediaGolsPro,
+        valorB: resumoB.mediaGolsPro,
+        compararPermitido: ambosComJogos,
+      },
+      {
+        chave: "golsContra",
+        rotulo: "Gols Contra",
+        tipo: "int",
+        polaridade: "lower",
+        valorA: valOuNulo(resumoA, "golsContra"),
+        valorB: valOuNulo(resumoB, "golsContra"),
+        compararPermitido: ambosComJogos,
+      },
+      {
+        chave: "mediaGolsContra",
+        rotulo: "Média de Gols Contra / jogo",
+        tipo: "dec2",
+        polaridade: "lower",
+        valorA: resumoA.mediaGolsContra,
+        valorB: resumoB.mediaGolsContra,
+        compararPermitido: ambosComJogos,
+      },
+      {
+        chave: "saldoGols",
+        rotulo: "Saldo de Gols",
+        tipo: "signedInt",
+        polaridade: "higher",
+        valorA: valOuNulo(resumoA, "saldoGols"),
+        valorB: valOuNulo(resumoB, "saldoGols"),
+        compararPermitido: ambosComJogos,
+      },
+      {
+        chave: "jogosSemSofrerGol",
+        rotulo: "Jogos sem sofrer gol",
+        tipo: "int",
+        polaridade: "higher",
+        valorA: valOuNulo(resumoA, "jogosSemSofrerGol"),
+        valorB: valOuNulo(resumoB, "jogosSemSofrerGol"),
+        subtextoA: resumoA.taxaSemSofrerGol !== null ? formatPct(resumoA.taxaSemSofrerGol) : "",
+        subtextoB: resumoB.taxaSemSofrerGol !== null ? formatPct(resumoB.taxaSemSofrerGol) : "",
+        compararPermitido: ambosComJogos,
+      },
+    ];
+
+    let vitoriasMetricasA = 0;
+    let vitoriasMetricasB = 0;
+    let empatesMetricas = 0;
+    let totalMetricasComparaveis = 0;
+
+    const metricas = definicoes.map((def) => {
+      const aval = avaliarComparacaoMetrica(
+        def.valorA,
+        def.valorB,
+        def.polaridade,
+        mesmaTemporada,
+        def.compararPermitido
+      );
+
+      if (def.polaridade !== "neutral") {
+        totalMetricasComparaveis += 1;
+        if (aval.vencedor === "A") vitoriasMetricasA += 1;
+        else if (aval.vencedor === "B") vitoriasMetricasB += 1;
+        else if (aval.vencedor === "tie") empatesMetricas += 1;
+      }
+
+      return {
+        chave: def.chave,
+        rotulo: def.rotulo,
+        tipo: def.tipo,
+        polaridade: def.polaridade,
+        valorA: def.valorA,
+        valorB: def.valorB,
+        subtextoA: def.subtextoA || "",
+        subtextoB: def.subtextoB || "",
+        diferenca: aval.diferenca,
+        diferencaAbsoluta: aval.diferencaAbsoluta,
+        vencedor: aval.vencedor,
+      };
+    });
+
+    const maxJogos = Math.max(
+      resumoA.seriePontosAcumulados.length,
+      resumoB.seriePontosAcumulados.length
+    );
+    const labels = [];
+    const serieA = [];
+    const serieB = [];
+
+    for (let i = 0; i < maxJogos; i += 1) {
+      labels.push(`J${i + 1}`);
+      serieA.push(
+        i < resumoA.seriePontosAcumulados.length ? resumoA.seriePontosAcumulados[i] : null
+      );
+      serieB.push(
+        i < resumoB.seriePontosAcumulados.length ? resumoB.seriePontosAcumulados[i] : null
+      );
+    }
+
+    return {
+      temporadaA: anoAValido ? anoA : null,
+      temporadaB: anoBValido ? anoB : null,
+      mando: mandoNormalizado,
+      mesmaTemporada,
+      resumoA,
+      resumoB,
+      metricas,
+      placarMetricas: {
+        vitoriasA: vitoriasMetricasA,
+        vitoriasB: vitoriasMetricasB,
+        empates: empatesMetricas,
+        comparaveis: totalMetricasComparaveis,
+      },
+      evolucao: {
+        maxJogos,
+        labels,
+        serieA,
+        serieB,
+        jogosA: resumoA.jogosOrdenados,
+        jogosB: resumoB.jogosOrdenados,
+      },
+    };
+  }
+
+  function formatComparatorValue(valor, tipo) {
+    if (valor === null || !Number.isFinite(valor)) return "—";
+    if (tipo === "pct") return formatPct(valor);
+    if (tipo === "dec2") return formatAvg(valor, 2);
+    if (tipo === "signedInt") return formatSigned(valor);
+    return fmtInt.format(valor);
+  }
+
+  function formatComparatorMagnitude(absValue, tipo) {
+    if (absValue === null || !Number.isFinite(absValue)) return "—";
+    if (tipo === "pct") {
+      if (absValue > 1e-9 && absValue < 0.05) return "< 0,1 p.p.";
+      return `${fmtDec1.format(absValue)} p.p.`;
+    }
+    if (tipo === "dec2") {
+      if (absValue > 1e-9 && absValue < 0.005) return "< 0,01";
+      return fmtDec2.format(absValue);
+    }
+    return fmtInt.format(absValue);
+  }
+
+  function buildComparatorDeltaDisplay(metrica, anoA, anoB, mesmaTemporada) {
+    if (mesmaTemporada) {
+      return {
+        text: "=",
+        tone: "neutral",
+        title: "Mesma temporada selecionada nos dois lados (diferença 0)",
+      };
+    }
+
+    if (metrica.diferenca === null || !Number.isFinite(metrica.diferenca)) {
+      return {
+        text: "—",
+        tone: "neutral",
+        title: "Sem jogos suficientes para comparar",
+      };
+    }
+
+    if (metrica.diferencaAbsoluta < 1e-9 || metrica.vencedor === "tie") {
+      return {
+        text: "=",
+        tone: "neutral",
+        title: "Empate exato entre as duas temporadas (diferença 0)",
+      };
+    }
+
+    const mag = formatComparatorMagnitude(metrica.diferencaAbsoluta, metrica.tipo);
+
+    if (metrica.polaridade === "neutral") {
+      const aMaior = metrica.diferenca > 0;
+      const lado = aMaior ? anoA : anoB;
+      return {
+        text: aMaior ? `← +${mag}` : `+${mag} →`,
+        tone: "neutral",
+        title: `Indicador neutro: ${lado} registrou ${mag} a mais`,
+      };
+    }
+
+    if (metrica.polaridade === "lower") {
+      const aVenceu = metrica.vencedor === "A";
+      const vencedorAno = aVenceu ? anoA : anoB;
+      const outroAno = aVenceu ? anoB : anoA;
+      return {
+        text: aVenceu ? `← −${mag}` : `−${mag} →`,
+        tone: aVenceu ? "a" : "b",
+        title: `Menor é melhor: ${vencedorAno} teve ${mag} a menos que ${outroAno}`,
+      };
+    }
+
+    const aVenceu = metrica.vencedor === "A";
+    const vencedorAno = aVenceu ? anoA : anoB;
+    const outroAno = aVenceu ? anoB : anoA;
+    return {
+      text: aVenceu ? `← +${mag}` : `+${mag} →`,
+      tone: aVenceu ? "a" : "b",
+      title: `${vencedorAno} superou ${outroAno} em ${mag}`,
+    };
+  }
+
+  function formatSeasonQuickSummary(resumo) {
+    if (!resumo || resumo.jogos === 0) {
+      return "Sem partidas registradas neste mando.";
+    }
+    return `${fmtInt.format(resumo.pontos)} pts · ${formatPct(resumo.aproveitamento)} · ${fmtInt.format(resumo.vitorias)}V ${fmtInt.format(resumo.empates)}E ${fmtInt.format(resumo.derrotas)}D · SG ${formatSigned(resumo.saldoGols)}`;
+  }
+
+  function syncComparatorControlsUI() {
+    if (dom["comparator-season-a"] && comparatorState.seasonA !== null) {
+      dom["comparator-season-a"].value = String(comparatorState.seasonA);
+    }
+    if (dom["comparator-season-b"] && comparatorState.seasonB !== null) {
+      dom["comparator-season-b"].value = String(comparatorState.seasonB);
+    }
+
+    document.querySelectorAll("[data-comparator-venue]").forEach((btn) => {
+      const active = btn.dataset.comparatorVenue === comparatorState.venue;
+      btn.classList.toggle("is-active", active);
+      btn.setAttribute("aria-pressed", String(active));
+    });
+  }
+
+  function createComparatorValueCell(side, valor, subtexto, tipo, cellState, barPct) {
+    const cell = document.createElement("div");
+    cell.className = `comparator-cell comparator-cell--${side} is-${cellState}`;
+
+    const pill = document.createElement("span");
+    pill.className = "comparator-val-pill";
+    pill.textContent = formatComparatorValue(valor, tipo);
+    cell.appendChild(pill);
+
+    if (subtexto) {
+      const subEl = document.createElement("span");
+      subEl.className = "comparator-val-sub";
+      subEl.textContent = subtexto;
+      cell.appendChild(subEl);
+    }
+
+    if (barPct !== null && Number.isFinite(barPct)) {
+      const track = document.createElement("div");
+      track.className = "comparator-bar-track";
+      track.setAttribute("aria-hidden", "true");
+
+      const fill = document.createElement("span");
+      fill.className = `comparator-bar-fill comparator-bar-fill--${side}`;
+      fill.style.width = `${Math.min(100, Math.max(0, barPct))}%`;
+
+      track.appendChild(fill);
+      cell.appendChild(track);
+    }
+
+    return cell;
+  }
+
+  function renderComparatorChart(comp) {
+    const canvas = dom["chart-comparator"];
+    const emptyEl = dom["empty-comparator"];
+    const emptyTextEl = dom["empty-comparator-text"];
+    if (!canvas || !emptyEl) return;
+
+    const { temporadaA, temporadaB, mando, mesmaTemporada, resumoA, resumoB, evolucao } = comp;
+    const mandoLabel =
+      mando === "Casa" ? "em Casa" : mando === "Fora" ? "Fora de Casa" : "em todos os jogos";
+
+    if (dom["comparator-chart-subtitle"]) {
+      const notaTam =
+        resumoA.jogos !== resumoB.jogos
+          ? ` · série menor interrompida naturalmente (${fmtInt.format(resumoA.jogos)} vs ${fmtInt.format(resumoB.jogos)} jogos)`
+          : "";
+      dom["comparator-chart-subtitle"].textContent = `Pontos acumulados jogo a jogo ${mandoLabel}${notaTam}`;
+    }
+
+    if (dom["comparator-chart-badge"]) {
+      dom["comparator-chart-badge"].textContent =
+        evolucao.maxJogos > 0
+          ? `Eixo até ${fmtInt.format(evolucao.maxJogos)} ${pluralizar(evolucao.maxJogos, "jogo", "jogos")}`
+          : "0 jogos";
+    }
+
+    if (evolucao.maxJogos === 0 || typeof Chart === "undefined") {
+      destroyChart("comparator");
+      setChartEmptyState(canvas, emptyEl, true);
+      if (emptyTextEl) {
+        emptyTextEl.textContent = "Sem partidas válidas para exibir a curva de pontos acumulados.";
+      }
+      return;
+    }
+
+    setChartEmptyState(canvas, emptyEl, false);
+    destroyChart("comparator");
+
+    const labelA = `${temporadaA}${TITULOS_SPFC.has(temporadaA) ? " ★" : ""} (${resumoA.jogos}J)`;
+    const labelB = `${temporadaB}${TITULOS_SPFC.has(temporadaB) ? " ★" : ""} (${resumoB.jogos}J)`;
+    const baseRadius = evolucao.maxJogos > 28 ? 2.2 : 3.2;
+
+    const makePointRadii = (len) =>
+      evolucao.labels.map((_, idx) => {
+        if (idx >= len) return 0;
+        return idx === len - 1 ? 5 : baseRadius;
+      });
+
+    const xAxisTitle =
+      mando === "Casa"
+        ? "Jogo em Casa na temporada"
+        : mando === "Fora"
+          ? "Jogo Fora na temporada"
+          : "Jogo na temporada";
+
+    charts.comparator = new Chart(canvas, {
+      type: "line",
+      data: {
+        labels: evolucao.labels,
+        datasets: [
+          {
+            label: labelA,
+            data: evolucao.serieA,
+            borderColor: COLORS.red,
+            backgroundColor: "rgba(213, 0, 28, 0.08)",
+            borderWidth: 2.8,
+            tension: 0.2,
+            spanGaps: false,
+            pointRadius: makePointRadii(resumoA.jogos),
+            pointHoverRadius: 6,
+            pointBackgroundColor: COLORS.red,
+            pointBorderColor: "#FFFFFF",
+            pointBorderWidth: 1.5,
+          },
+          {
+            label: labelB,
+            data: evolucao.serieB,
+            borderColor: COLORS.black,
+            backgroundColor: "rgba(17, 19, 21, 0.07)",
+            borderWidth: 2.6,
+            borderDash: mesmaTemporada ? [6, 4] : [],
+            tension: 0.2,
+            spanGaps: false,
+            pointStyle: "rectRounded",
+            pointRadius: makePointRadii(resumoB.jogos),
+            pointHoverRadius: 6,
+            pointBackgroundColor: COLORS.black,
+            pointBorderColor: "#FFFFFF",
+            pointBorderWidth: 1.5,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: {
+            position: "top",
+            align: "end",
+            labels: { boxWidth: 12, usePointStyle: true },
+          },
+          tooltip: {
+            filter(item) {
+              return item.parsed.y !== null && item.parsed.y !== undefined;
+            },
+            callbacks: {
+              title(items) {
+                if (!items || !items.length) return "";
+                const idx = items[0].dataIndex;
+                return `Jogo ${idx + 1} (${mando === "ALL" ? "Todos" : mando})`;
+              },
+              label(ctx) {
+                if (ctx.parsed.y === null || ctx.parsed.y === undefined) return null;
+                const idx = ctx.dataIndex;
+                const isA = ctx.datasetIndex === 0;
+                const ano = isA ? temporadaA : temporadaB;
+                const jogo = isA ? evolucao.jogosA[idx] : evolucao.jogosB[idx];
+                if (!jogo) return `${ano}: ${ctx.parsed.y} pts`;
+                return `${ano}: ${ctx.parsed.y} pts — ${jogo.resultado} ${jogo.golsPro}×${jogo.golsContra} vs ${jogo.adversario} (R${jogo.rodada}, ${formatDateBR(jogo.data)})`;
+              },
+              afterBody(items) {
+                if (!items || !items.length) return "";
+                const idx = items[0].dataIndex;
+                const ptsA = evolucao.serieA[idx];
+                const ptsB = evolucao.serieB[idx];
+                if (mesmaTemporada) {
+                  return "Mesma temporada selecionada nos dois lados (diferença: 0 pts)";
+                }
+                if (ptsA !== null && ptsB !== null) {
+                  const diff = ptsA - ptsB;
+                  if (diff === 0) return `Empatadas com ${ptsA} pts no Jogo ${idx + 1}`;
+                  const lider = diff > 0 ? temporadaA : temporadaB;
+                  return `Diferença no Jogo ${idx + 1}: ${lider} +${Math.abs(diff)} ${pluralizar(Math.abs(diff), "ponto", "pontos")} à frente`;
+                }
+                if (ptsA === null && ptsB !== null) {
+                  return `${temporadaA} encerrou com ${resumoA.jogos} ${pluralizar(resumoA.jogos, "jogo", "jogos")}`;
+                }
+                if (ptsB === null && ptsA !== null) {
+                  return `${temporadaB} encerrou com ${resumoB.jogos} ${pluralizar(resumoB.jogos, "jogo", "jogos")}`;
+                }
+                return "";
+              },
+            },
+          },
+        },
+        scales: {
+          x: {
+            grid: { display: false },
+            title: { display: true, text: xAxisTitle, color: COLORS.tick },
+            ticks: {
+              color: COLORS.tick,
+              autoSkip: true,
+              maxTicksLimit: 12,
+            },
+          },
+          y: {
+            beginAtZero: true,
+            title: { display: true, text: "Pontos acumulados", color: COLORS.tick },
+            grid: { color: COLORS.grid },
+            ticks: { color: COLORS.tick, precision: 0 },
+          },
+        },
+      },
+    });
+  }
+
+  function renderSeasonComparator() {
+    if (!dom["comparator-section"] || comparatorState.seasonA === null || comparatorState.seasonB === null) {
+      return;
+    }
+
+    syncComparatorControlsUI();
+
+    const comp = compararTemporadas(
+      allMatches,
+      comparatorState.seasonA,
+      comparatorState.seasonB,
+      comparatorState.venue
+    );
+
+    const { temporadaA, temporadaB, mando, mesmaTemporada, resumoA, resumoB, metricas, placarMetricas } =
+      comp;
+
+    // Aviso contextual (mesma temporada ou quantidades diferentes de jogos)
+    if (dom["comparator-notice"]) {
+      const avisos = [];
+      if (mesmaTemporada) {
+        avisos.push(
+          `A mesma temporada (${temporadaA}) está selecionada nos dois lados — todos os indicadores aparecem em estado neutro (=).`
+        );
+      } else if (resumoA.jogos !== resumoB.jogos) {
+        avisos.push(
+          `As temporadas possuem quantidades diferentes de jogos (${temporadaA}: ${resumoA.jogos} vs ${temporadaB}: ${resumoB.jogos}). Use Aproveitamento (%) e médias por jogo para comparação proporcional.`
+        );
+      }
+
+      if (avisos.length > 0) {
+        dom["comparator-notice"].textContent = avisos.join(" ");
+        dom["comparator-notice"].classList.remove("is-hidden");
+      } else {
+        dom["comparator-notice"].textContent = "";
+        dom["comparator-notice"].classList.add("is-hidden");
+      }
+    }
+
+    // Cabeçalho com resumo rápido das duas temporadas
+    const mandoTag = mando === "ALL" ? "" : ` (${mando})`;
+    dom["comparator-a-year"].textContent = String(temporadaA);
+    dom["comparator-a-games"].textContent = `${fmtInt.format(resumoA.jogos)} ${pluralizar(resumoA.jogos, "jogo", "jogos")}${mandoTag}`;
+    dom["comparator-a-title-pill"].classList.toggle("is-hidden", !TITULOS_SPFC.has(temporadaA));
+    dom["comparator-a-quick"].textContent = formatSeasonQuickSummary(resumoA);
+
+    dom["comparator-b-year"].textContent = String(temporadaB);
+    dom["comparator-b-games"].textContent = `${fmtInt.format(resumoB.jogos)} ${pluralizar(resumoB.jogos, "jogo", "jogos")}${mandoTag}`;
+    dom["comparator-b-title-pill"].classList.toggle("is-hidden", !TITULOS_SPFC.has(temporadaB));
+    dom["comparator-b-quick"].textContent = formatSeasonQuickSummary(resumoB);
+
+    // Resumo central de vantagem
+    if (dom["comparator-advantage-summary"]) {
+      if (mesmaTemporada) {
+        dom["comparator-advantage-summary"].textContent = "Mesma temporada · 0 diferenças";
+      } else if (resumoA.jogos === 0 || resumoB.jogos === 0) {
+        dom["comparator-advantage-summary"].textContent = "Aguardando jogos nos dois lados";
+      } else if (placarMetricas.vitoriasA > placarMetricas.vitoriasB) {
+        dom["comparator-advantage-summary"].textContent = `${temporadaA} lidera em ${placarMetricas.vitoriasA} de ${placarMetricas.comparaveis} métricas`;
+      } else if (placarMetricas.vitoriasB > placarMetricas.vitoriasA) {
+        dom["comparator-advantage-summary"].textContent = `${temporadaB} lidera em ${placarMetricas.vitoriasB} de ${placarMetricas.comparaveis} métricas`;
+      } else {
+        dom["comparator-advantage-summary"].textContent = `Equilíbrio: ${placarMetricas.vitoriasA} × ${placarMetricas.vitoriasB} (${placarMetricas.empates} ${pluralizar(placarMetricas.empates, "empate", "empates")})`;
+      }
+    }
+
+    // Cabeçalho das colunas da tabela comparativa
+    dom["comparator-col-a"].textContent = `${temporadaA}${TITULOS_SPFC.has(temporadaA) ? " ★" : ""}`;
+    dom["comparator-col-b"].textContent = `${temporadaB}${TITULOS_SPFC.has(temporadaB) ? " ★" : ""}`;
+
+    // Grid comparativo de 3 colunas (DOM seguro, zero innerHTML)
+    const bodyEl = dom["comparator-metrics-body"];
+    const fragment = document.createDocumentFragment();
+
+    for (const m of metricas) {
+      const row = document.createElement("div");
+      row.className = "comparator-row";
+
+      let stateA = "neutral";
+      let stateB = "neutral";
+      if (!mesmaTemporada && m.vencedor === "A") {
+        stateA = "winner";
+        stateB = "loser";
+      } else if (!mesmaTemporada && m.vencedor === "B") {
+        stateA = "loser";
+        stateB = "winner";
+      }
+
+      // Barra proporcional sutil somente quando ambos os valores são não-negativos
+      let barA = null;
+      let barB = null;
+      if (
+        Number.isFinite(m.valorA) &&
+        Number.isFinite(m.valorB) &&
+        m.valorA >= 0 &&
+        m.valorB >= 0
+      ) {
+        const maxVal = Math.max(m.valorA, m.valorB);
+        barA = maxVal > 0 ? (m.valorA / maxVal) * 100 : 0;
+        barB = maxVal > 0 ? (m.valorB / maxVal) * 100 : 0;
+      }
+
+      const cellA = createComparatorValueCell("a", m.valorA, m.subtextoA, m.tipo, stateA, barA);
+      const cellB = createComparatorValueCell("b", m.valorB, m.subtextoB, m.tipo, stateB, barB);
+
+      const centerCell = document.createElement("div");
+      centerCell.className = "comparator-center-cell";
+
+      const labelEl = document.createElement("span");
+      labelEl.className = "comparator-metric-label";
+      labelEl.textContent = m.rotulo;
+      centerCell.appendChild(labelEl);
+
+      if (m.polaridade === "lower") {
+        const hintEl = document.createElement("span");
+        hintEl.className = "comparator-polarity-hint";
+        hintEl.textContent = "↓ menor é melhor";
+        centerCell.appendChild(hintEl);
+      }
+
+      const deltaInfo = buildComparatorDeltaDisplay(m, temporadaA, temporadaB, mesmaTemporada);
+      const deltaBadge = document.createElement("span");
+      deltaBadge.className = `comparator-delta-badge comparator-delta-badge--${deltaInfo.tone}`;
+      deltaBadge.textContent = deltaInfo.text;
+      deltaBadge.title = deltaInfo.title;
+      centerCell.appendChild(deltaBadge);
+
+      row.appendChild(cellA);
+      row.appendChild(centerCell);
+      row.appendChild(cellB);
+      fragment.appendChild(row);
+    }
+
+    bodyEl.replaceChildren(fragment);
+
+    // Gráfico comparativo de evolução (Pontos Acumulados)
+    renderComparatorChart(comp);
+  }
+
+  function populateComparatorSelects() {
+    const selectA = dom["comparator-season-a"];
+    const selectB = dom["comparator-season-b"];
+    if (!selectA || !selectB) return;
+
+    const availableSeasonsDesc = [
+      ...new Set(
+        allMatches
+          .map((m) => m.temporada)
+          .filter((year) => typeof year === "number" && Number.isFinite(year))
+      ),
+    ].sort((a, b) => b - a);
+
+    selectA.replaceChildren();
+    selectB.replaceChildren();
+
+    for (const year of availableSeasonsDesc) {
+      const label = TITULOS_SPFC.has(year) ? `${year} ★` : String(year);
+      selectA.add(new Option(label, String(year)));
+      selectB.add(new Option(label, String(year)));
+    }
+
+    // Valores padrão inteligentes: duas temporadas mais recentes disponíveis na base
+    if (availableSeasonsDesc.length > 0) {
+      comparatorState.seasonA = availableSeasonsDesc[0];
+      comparatorState.seasonB =
+        availableSeasonsDesc.length > 1 ? availableSeasonsDesc[1] : availableSeasonsDesc[0];
+      comparatorState.venue = "ALL";
+    }
+  }
+
+  // =========================================================================
   // Tabela de Partidas Filtradas (busca, filtro V/E/D, ordenação e paginação)
   // =========================================================================
 
@@ -2721,6 +3655,43 @@
       state.tablePage += 1;
       renderTable(getFilteredMatches());
     });
+
+    // Eventos isolados do Comparador de Temporadas (não alteram filtros globais nem URL)
+    if (dom["comparator-season-a"]) {
+      dom["comparator-season-a"].addEventListener("change", (e) => {
+        const val = Number(e.target.value);
+        if (Number.isFinite(val)) {
+          comparatorState.seasonA = val;
+          renderSeasonComparator();
+        }
+      });
+    }
+
+    if (dom["comparator-season-b"]) {
+      dom["comparator-season-b"].addEventListener("change", (e) => {
+        const val = Number(e.target.value);
+        if (Number.isFinite(val)) {
+          comparatorState.seasonB = val;
+          renderSeasonComparator();
+        }
+      });
+    }
+
+    if (dom["comparator-swap"]) {
+      dom["comparator-swap"].addEventListener("click", () => {
+        const prevA = comparatorState.seasonA;
+        comparatorState.seasonA = comparatorState.seasonB;
+        comparatorState.seasonB = prevA;
+        renderSeasonComparator();
+      });
+    }
+
+    document.querySelectorAll("[data-comparator-venue]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        comparatorState.venue = normalizarMandoComparador(btn.dataset.comparatorVenue);
+        renderSeasonComparator();
+      });
+    });
   }
 
   function configureChartDefaults() {
@@ -2882,12 +3853,14 @@
       applyAutoUpdateBadge(syncMeta);
 
       populateSelectOptions();
+      populateComparatorSelects();
       applyFiltersFromUrl();
       bindEvents();
 
       dom["state-loading"].classList.add("is-hidden");
       dom["dashboard-root"].classList.remove("is-hidden");
       updateDashboard();
+      renderSeasonComparator();
     } catch (error) {
       console.error("Erro ao inicializar Dados Tricolor:", error);
       dom["state-loading"].classList.add("is-hidden");
@@ -2900,5 +3873,15 @@
     }
   }
 
-  document.addEventListener("DOMContentLoaded", init);
+  if (typeof document !== "undefined") {
+    document.addEventListener("DOMContentLoaded", init);
+  }
+
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      resumirTemporada,
+      compararTemporadas,
+      calcularRecordesESequencias,
+    };
+  }
 })();
