@@ -290,8 +290,8 @@ a:focus-visible {
 
 @media (min-width: 1024px) {
   .filters-main-row {
-    grid-template-columns: auto minmax(220px, 1fr) auto auto;
-    gap: 16px;
+    grid-template-columns: auto minmax(180px, 1fr) auto auto;
+    gap: 14px;
   }
 }
 
@@ -382,6 +382,34 @@ a:focus-visible {
   box-shadow: var(--shadow-xs);
 }
 
+.filter-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.filter-actions .btn-share,
+.filter-actions .btn-reset {
+  flex: 1 1 124px;
+}
+
+@media (min-width: 1024px) {
+  .filter-actions {
+    flex-wrap: nowrap;
+  }
+
+  .filter-actions .btn-share,
+  .filter-actions .btn-reset {
+    flex: 0 0 auto;
+  }
+
+  .btn-share {
+    min-width: 134px;
+  }
+}
+
+.btn-share,
 .btn-reset {
   height: 36px;
   display: inline-flex;
@@ -398,6 +426,24 @@ a:focus-visible {
   cursor: pointer;
   white-space: nowrap;
   transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.btn-share:hover:not(.is-copied):not(.is-error) {
+  border-color: var(--spfc-black);
+  background-color: var(--spfc-black);
+  color: #ffffff;
+}
+
+.btn-share.is-copied {
+  border-color: rgba(21, 128, 61, 0.35);
+  background-color: var(--win-bg);
+  color: var(--win);
+}
+
+.btn-share.is-error {
+  border-color: rgba(220, 38, 38, 0.35);
+  background-color: var(--loss-bg);
+  color: var(--loss);
 }
 
 .btn-reset:hover:not(:disabled) {

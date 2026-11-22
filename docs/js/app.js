@@ -10,6 +10,12 @@
   const META_URL = "data/meta.json";
   const CLASSICOS = new Set(["Corinthians", "Palmeiras", "Santos"]);
   const TITULOS_SPFC = new Set([2006, 2007, 2008]);
+  const VALID_VENUES = new Map([
+    ["casa", "Casa"],
+    ["fora", "Fora"],
+  ]);
+  const VALID_RESULTS = new Set(["V", "E", "D"]);
+  const MAX_SEARCH_URL_LENGTH = 120;
 
   const COLORS = {
     red: "#D5001C",
@@ -43,6 +49,9 @@
   let minSeason = 2003;
   let maxSeason = 2003;
   let modernStart = 2014;
+  let validSeasons = new Set();
+  let opponentLookup = new Map();
+  let shareFeedbackTimer = null;
 
   const state = {
     seasonStart: 2003,
@@ -81,6 +90,9 @@
       "filter-season-start",
       "filter-season-end",
       "filter-opponent",
+      "btn-share-link",
+      "btn-share-label",
+      "share-feedback-live",
       "btn-reset-filters",
       "filter-status-count",
       "state-loading",
@@ -314,8 +326,28 @@
       state.seasonStart === minSeason &&
       state.seasonEnd === maxSeason &&
       state.opponent === "ALL" &&
-      state.venue === "ALL"
+      state.venue === "ALL" &&
+      state.tableResult === "ALL" &&
+      state.tableSearch.trim() === ""
     );
+  }
+
+  function syncTableFilterControlsUI() {
+    if (
+      dom["table-search"] &&
+      document.activeElement !== dom["table-search"] &&
+      dom["table-search"].value !== state.tableSearch
+    ) {
+      dom["table-search"].value = state.tableSearch;
+    }
+
+    document.querySelectorAll("[data-result]").forEach((btn) => {
+      const active = btn.dataset.result === state.tableResult;
+      btn.classList.toggle("is-active", active);
+      btn.setAttribute("aria-pressed", String(active));
+    });
+
+    dom["btn-reset-filters"].disabled = isDefaultFilter();
   }
 
   function syncFilterControlsUI(filteredCount) {
@@ -346,10 +378,220 @@
       btn.classList.toggle("is-active", btn.dataset.presetOpponent === state.opponent);
     });
 
-    dom["btn-reset-filters"].disabled = isDefaultFilter();
+    syncTableFilterControlsUI();
 
     const total = allMatches.length;
     dom["filter-status-count"].textContent = `Exibindo ${fmtInt.format(filteredCount)} de ${fmtInt.format(total)} partidas`;
+  }
+
+  // =========================================================================
+  // Sincronização Bidirecional com a URL (Query Parameters) e Compartilhamento
+  // =========================================================================
+
+  function parseValidSeasonParam(rawValue) {
+    if (typeof rawValue !== "string") return null;
+    const trimmed = rawValue.trim();
+    if (!/^\d{4}$/.test(trimmed)) return null;
+    const year = Number(trimmed);
+    return validSeasons.has(year) ? year : null;
+  }
+
+  function applyFiltersFromUrl() {
+    if (!window.location.search) return;
+
+    try {
+      const params = new URLSearchParams(window.location.search);
+
+      // Intervalo de temporadas: de / ate
+      const parsedStart = parseValidSeasonParam(params.get("de"));
+      const parsedEnd = parseValidSeasonParam(params.get("ate"));
+
+      if (parsedStart !== null) {
+        state.seasonStart = parsedStart;
+      }
+      if (parsedEnd !== null) {
+        state.seasonEnd = parsedEnd;
+      }
+      if (state.seasonStart > state.seasonEnd) {
+        const tmp = state.seasonStart;
+        state.seasonStart = state.seasonEnd;
+        state.seasonEnd = tmp;
+      }
+
+      // Adversário (aceita correspondência exata ou normalizada sem acentos/maiúsculas)
+      const rawOpponent = params.get("adversario");
+      if (typeof rawOpponent === "string" && rawOpponent.trim()) {
+        const canonicalOpponent = opponentLookup.get(normalizeText(rawOpponent));
+        if (canonicalOpponent) {
+          state.opponent = canonicalOpponent;
+        }
+      }
+
+      // Mando de campo (Casa | Fora)
+      const rawVenue = params.get("mando");
+      if (typeof rawVenue === "string" && rawVenue.trim()) {
+        const canonicalVenue = VALID_VENUES.get(normalizeText(rawVenue));
+        if (canonicalVenue) {
+          state.venue = canonicalVenue;
+        }
+      }
+
+      // Resultado na tabela (V | E | D)
+      const rawResult = params.get("resultado");
+      if (typeof rawResult === "string" && rawResult.trim()) {
+        const upperResult = rawResult.trim().toUpperCase();
+        if (VALID_RESULTS.has(upperResult)) {
+          state.tableResult = upperResult;
+        }
+      }
+
+      // Busca textual na tabela
+      const rawSearch = params.get("busca");
+      if (typeof rawSearch === "string") {
+        const cleanedSearch = rawSearch.trim().slice(0, MAX_SEARCH_URL_LENGTH);
+        if (cleanedSearch) {
+          state.tableSearch = cleanedSearch;
+        }
+      }
+    } catch {
+      // Fallback seguro: ignora query string malformada sem quebrar a página
+    }
+  }
+
+  function buildUrlFromState() {
+    const params = new URLSearchParams();
+
+    if (state.seasonStart !== minSeason) {
+      params.set("de", String(state.seasonStart));
+    }
+    if (state.seasonEnd !== maxSeason) {
+      params.set("ate", String(state.seasonEnd));
+    }
+    if (state.opponent !== "ALL") {
+      params.set("adversario", state.opponent);
+    }
+    if (state.venue !== "ALL") {
+      params.set("mando", state.venue);
+    }
+    if (state.tableResult !== "ALL") {
+      params.set("resultado", state.tableResult);
+    }
+    const trimmedSearch = state.tableSearch.trim();
+    if (trimmedSearch) {
+      params.set("busca", trimmedSearch);
+    }
+
+    const queryString = params.toString();
+    const pathname = window.location.pathname;
+    const hash = window.location.hash;
+    return `${pathname}${queryString ? `?${queryString}` : ""}${hash}`;
+  }
+
+  function syncUrlWithState() {
+    if (!window.history || typeof window.history.replaceState !== "function") return;
+    const nextUrl = buildUrlFromState();
+    const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (nextUrl === currentUrl) return;
+    try {
+      window.history.replaceState(null, "", nextUrl);
+    } catch {
+      // Ignora silenciosamente em ambientes com History API restrita
+    }
+  }
+
+  async function copyTextToClipboard(text) {
+    if (
+      navigator.clipboard &&
+      typeof navigator.clipboard.writeText === "function" &&
+      window.isSecureContext
+    ) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch {
+        // Segue para o fallback abaixo se a Clipboard API falhar ou negar permissão
+      }
+    }
+
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.top = "-9999px";
+    textarea.style.left = "-9999px";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+
+    const selection = document.getSelection();
+    const previousRange = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+
+    try {
+      textarea.focus({ preventScroll: true });
+    } catch {
+      textarea.focus();
+    }
+    textarea.select();
+    textarea.setSelectionRange(0, text.length);
+
+    let copied = false;
+    try {
+      copied = document.execCommand("copy");
+    } catch {
+      copied = false;
+    }
+
+    document.body.removeChild(textarea);
+    if (previousRange && selection) {
+      selection.removeAllRanges();
+      selection.addRange(previousRange);
+    }
+
+    return copied;
+  }
+
+  function showShareFeedback(success) {
+    const btn = dom["btn-share-link"];
+    const labelEl = dom["btn-share-label"];
+    const liveEl = dom["share-feedback-live"];
+    if (!btn || !labelEl) return;
+
+    const iconCopy = btn.querySelector(".btn-share-icon-copy");
+    const iconCheck = btn.querySelector(".btn-share-icon-check");
+
+    if (shareFeedbackTimer) {
+      window.clearTimeout(shareFeedbackTimer);
+      shareFeedbackTimer = null;
+    }
+
+    btn.classList.remove("is-copied", "is-error");
+    if (success) {
+      btn.classList.add("is-copied");
+      labelEl.textContent = "Link copiado!";
+      if (iconCopy) iconCopy.classList.add("is-hidden");
+      if (iconCheck) iconCheck.classList.remove("is-hidden");
+      if (liveEl) liveEl.textContent = "Link com os filtros atuais copiado para a área de transferência.";
+    } else {
+      btn.classList.add("is-error");
+      labelEl.textContent = "Não copiado";
+      if (iconCopy) iconCopy.classList.remove("is-hidden");
+      if (iconCheck) iconCheck.classList.add("is-hidden");
+      if (liveEl) liveEl.textContent = "Não foi possível copiar o link automaticamente.";
+    }
+
+    shareFeedbackTimer = window.setTimeout(() => {
+      btn.classList.remove("is-copied", "is-error");
+      labelEl.textContent = "Copiar link";
+      if (iconCopy) iconCopy.classList.remove("is-hidden");
+      if (iconCheck) iconCheck.classList.add("is-hidden");
+      if (liveEl) liveEl.textContent = "";
+      shareFeedbackTimer = null;
+    }, 2000);
+  }
+
+  async function handleShareLinkClick() {
+    syncUrlWithState();
+    const copied = await copyTextToClipboard(window.location.href);
+    showShareFeedback(copied);
   }
 
   function describeActiveFilters() {
@@ -1489,6 +1731,7 @@
   function updateDashboard() {
     const filtered = getFilteredMatches();
     syncFilterControlsUI(filtered.length);
+    syncUrlWithState();
     renderKPIs(filtered);
     renderEvolutionChart(filtered);
     renderVenueChart(filtered);
@@ -1502,7 +1745,12 @@
     state.seasonEnd = maxSeason;
     state.opponent = "ALL";
     state.venue = "ALL";
+    state.tableResult = "ALL";
+    state.tableSearch = "";
     state.tablePage = 1;
+    if (dom["table-search"]) {
+      dom["table-search"].value = "";
+    }
     updateDashboard();
   }
 
@@ -1524,7 +1772,9 @@
 
     seasonStartEl.innerHTML = "";
     seasonEndEl.innerHTML = "";
+    validSeasons = new Set();
     for (let y = minSeason; y <= maxSeason; y += 1) {
+      validSeasons.add(y);
       seasonStartEl.add(new Option(String(y), String(y)));
       seasonEndEl.add(new Option(String(y), String(y)));
     }
@@ -1533,9 +1783,11 @@
       a.localeCompare(b, "pt-BR")
     );
 
+    opponentLookup = new Map([["classicos", "CLASSICOS"]]);
     const optGroup = document.createElement("optgroup");
     optGroup.label = "Adversários (A–Z)";
     for (const opp of opponents) {
+      opponentLookup.set(normalizeText(opp), opp);
       optGroup.appendChild(new Option(opp, opp));
     }
     oppEl.appendChild(optGroup);
@@ -1605,6 +1857,9 @@
       });
     });
 
+    if (dom["btn-share-link"]) {
+      dom["btn-share-link"].addEventListener("click", handleShareLinkClick);
+    }
     dom["btn-reset-filters"].addEventListener("click", resetAllFilters);
     dom["btn-empty-reset"].addEventListener("click", resetAllFilters);
 
@@ -1645,6 +1900,8 @@
     dom["table-search"].addEventListener("input", (e) => {
       state.tableSearch = e.target.value;
       state.tablePage = 1;
+      dom["btn-reset-filters"].disabled = isDefaultFilter();
+      syncUrlWithState();
       renderTable(getFilteredMatches());
     });
 
@@ -1652,9 +1909,8 @@
       btn.addEventListener("click", () => {
         state.tableResult = btn.dataset.result;
         state.tablePage = 1;
-        document.querySelectorAll("[data-result]").forEach((b) => {
-          b.classList.toggle("is-active", b === btn);
-        });
+        syncTableFilterControlsUI();
+        syncUrlWithState();
         renderTable(getFilteredMatches());
       });
     });
@@ -1851,6 +2107,7 @@
       applyAutoUpdateBadge(syncMeta);
 
       populateSelectOptions();
+      applyFiltersFromUrl();
       bindEvents();
 
       dom["state-loading"].classList.add("is-hidden");
