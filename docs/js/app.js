@@ -8,8 +8,11 @@
 
   const DATA_URL = "data/spfc_pontos_corridos.json";
   const META_URL = "data/meta.json";
+  const NEXT_MATCH_URL = "data/proximo_jogo.json";
   const CLASSICOS = new Set(["Corinthians", "Palmeiras", "Santos"]);
   const TITULOS_SPFC = new Set([2006, 2007, 2008]);
+  const WEEKDAYS_PT_SHORT = ["dom", "seg", "ter", "qua", "qui", "sex", "sáb"];
+  const MS_PER_DAY = 86400000;
   const VALID_VENUES = new Map([
     ["casa", "Casa"],
     ["fora", "Fora"],
@@ -51,6 +54,10 @@
   let modernStart = 2014;
   let validSeasons = new Set();
   let opponentLookup = new Map();
+  let validOpponentClubs = new Map();
+  let dashboardReady = false;
+  let dashboardFailed = false;
+  let nextMatchPayload = null;
   let shareFeedbackTimer = null;
 
   const state = {
@@ -92,6 +99,9 @@
       "header-dataset-badge",
       "header-updated-badge",
       "header-updated-text",
+      "next-match-section",
+      "next-match-card",
+      "filters-section",
       "chip-period-all",
       "chip-period-modern",
       "chip-period-current",
@@ -3493,10 +3503,13 @@
     );
 
     opponentLookup = new Map([["classicos", "CLASSICOS"]]);
+    validOpponentClubs = new Map();
     const optGroup = document.createElement("optgroup");
     optGroup.label = "Adversários (A–Z)";
     for (const opp of opponents) {
-      opponentLookup.set(normalizeText(opp), opp);
+      const normalized = normalizeText(opp);
+      opponentLookup.set(normalized, opp);
+      validOpponentClubs.set(normalized, opp);
       optGroup.appendChild(new Option(opp, opp));
     }
     oppEl.appendChild(optGroup);
@@ -3812,9 +3825,537 @@
     }
   }
 
+  // =========================================================================
+  // Card de Próximo Jogo (carregamento resiliente e atalho de retrospecto)
+  // =========================================================================
+
+  function parseIsoCalendarDate(isoDate) {
+    if (typeof isoDate !== "string") return null;
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate.trim());
+    if (!match) return null;
+
+    const yearNum = Number(match[1]);
+    const monthNum = Number(match[2]);
+    const dayNum = Number(match[3]);
+    if (monthNum < 1 || monthNum > 12 || dayNum < 1 || dayNum > 31) return null;
+
+    const utc = new Date(Date.UTC(yearNum, monthNum - 1, dayNum));
+    if (
+      utc.getUTCFullYear() !== yearNum ||
+      utc.getUTCMonth() !== monthNum - 1 ||
+      utc.getUTCDate() !== dayNum
+    ) {
+      return null;
+    }
+
+    return {
+      year: match[1],
+      month: match[2],
+      day: match[3],
+      yearNum,
+      monthNum,
+      dayNum,
+      weekdayIndex: utc.getUTCDay(),
+      utcMs: utc.getTime(),
+    };
+  }
+
+  function getLocalTodayIso(referenceDate = new Date()) {
+    const ref = referenceDate instanceof Date && !Number.isNaN(referenceDate.getTime())
+      ? referenceDate
+      : new Date();
+    const year = String(ref.getFullYear());
+    const month = String(ref.getMonth() + 1).padStart(2, "0");
+    const day = String(ref.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+
+  function formatarDataProximoJogo(isoDate) {
+    const parsed = parseIsoCalendarDate(isoDate);
+    if (!parsed) return null;
+    const weekday = WEEKDAYS_PT_SHORT[parsed.weekdayIndex];
+    return `${weekday}, ${parsed.day}/${parsed.month}/${parsed.year}`;
+  }
+
+  function formatarHoraProximoJogo(hora, horarioDefinido) {
+    if (horarioDefinido === true && typeof hora === "string") {
+      const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(hora.trim());
+      if (match) {
+        return {
+          texto: `${match[1]}h${match[2]} (Brasília)`,
+          definido: true,
+        };
+      }
+    }
+    return {
+      texto: "Horário a definir",
+      definido: false,
+    };
+  }
+
+  function calcularSeloTemporalProximoJogo(isoDate, hojeIso = getLocalTodayIso()) {
+    const alvo = parseIsoCalendarDate(isoDate);
+    const ref = parseIsoCalendarDate(hojeIso);
+    if (!alvo || !ref) return null;
+
+    const diffDays = Math.round((alvo.utcMs - ref.utcMs) / MS_PER_DAY);
+    if (diffDays === 0) {
+      return { texto: "Hoje", tom: "today", dias: 0 };
+    }
+    if (diffDays === 1) {
+      return { texto: "Amanhã", tom: "tomorrow", dias: 1 };
+    }
+    if (diffDays > 1) {
+      return { texto: `Em ${fmtInt.format(diffDays)} dias`, tom: "upcoming", dias: diffDays };
+    }
+    return { texto: "Aguardando atualização do resultado", tom: "past", dias: diffDays };
+  }
+
+  function resolverAdversarioNaBase(adversario, clubsLookup = validOpponentClubs) {
+    if (typeof adversario !== "string" || !adversario.trim()) return null;
+    if (!(clubsLookup instanceof Map) || clubsLookup.size === 0) return null;
+    const canonical = clubsLookup.get(normalizeText(adversario));
+    if (!canonical || canonical === "ALL" || canonical === "CLASSICOS") return null;
+    return canonical;
+  }
+
+  function calcularResumoConfronto(canonicalOpponent, matches = allMatches) {
+    if (!canonicalOpponent || !Array.isArray(matches) || matches.length === 0) return null;
+    const h2hMatches = matches.filter((m) => m && m.adversario === canonicalOpponent);
+    if (h2hMatches.length === 0) return null;
+    const summary = computeSummary(h2hMatches);
+    return {
+      games: summary.games,
+      wins: summary.wins,
+      draws: summary.draws,
+      losses: summary.losses,
+      winrate: summary.winrate,
+    };
+  }
+
+  function montarModeloProximoJogo(payload, opcoes = {}) {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return { estado: "oculto" };
+    }
+
+    const atualizadoEmFormatado =
+      typeof payload.atualizado_em === "string" && payload.atualizado_em.trim()
+        ? formatDateTimeBRT(payload.atualizado_em)
+        : null;
+
+    if (payload.tem_proximo_jogo === false || payload.proximo_jogo === null) {
+      return {
+        estado: "sem_jogo",
+        mensagem: "Nenhum jogo do Brasileirão agendado no momento",
+        atualizadoEmFormatado,
+      };
+    }
+
+    if (
+      payload.tem_proximo_jogo !== true ||
+      typeof payload.proximo_jogo !== "object" ||
+      Array.isArray(payload.proximo_jogo)
+    ) {
+      return { estado: "oculto" };
+    }
+
+    const pj = payload.proximo_jogo;
+    const adversario = typeof pj.adversario === "string" ? pj.adversario.trim() : "";
+    const dataFormatada = formatarDataProximoJogo(pj.data);
+    if (!adversario || !dataFormatada) {
+      return { estado: "oculto" };
+    }
+
+    const mandoRaw = typeof pj.mando === "string" ? pj.mando.trim() : "";
+    const mando = mandoRaw === "Casa" ? "Casa" : mandoRaw === "Fora" ? "Fora" : null;
+    const spfcEsquerda = mando !== "Fora";
+    const timeEsquerda = spfcEsquerda ? "São Paulo" : adversario;
+    const timeDireita = spfcEsquerda ? adversario : "São Paulo";
+
+    const competicao =
+      typeof pj.competicao === "string" && pj.competicao.trim()
+        ? pj.competicao.trim()
+        : "Brasileirão Série A";
+    const rodada =
+      typeof pj.rodada === "number" && Number.isInteger(pj.rodada) && pj.rodada > 0
+        ? pj.rodada
+        : null;
+    const competicaoRodada = rodada ? `${competicao} · Rodada ${rodada}` : competicao;
+
+    const horario = formatarHoraProximoJogo(pj.hora, pj.horario_definido);
+    const seloTemporal = calcularSeloTemporalProximoJogo(
+      pj.data,
+      opcoes.hojeIso || getLocalTodayIso()
+    );
+
+    const baseCarregada = Boolean(opcoes.baseCarregada);
+    const baseFalhou = Boolean(opcoes.baseFalhou);
+    const clubsLookup = opcoes.clubsLookup instanceof Map ? opcoes.clubsLookup : validOpponentClubs;
+    const matches = Array.isArray(opcoes.matches) ? opcoes.matches : allMatches;
+
+    const adversarioCanonico = baseCarregada
+      ? resolverAdversarioNaBase(adversario, clubsLookup)
+      : null;
+    const confrontoInedito = Boolean(baseCarregada && !adversarioCanonico);
+    const resumoHistorico = adversarioCanonico
+      ? calcularResumoConfronto(adversarioCanonico, matches)
+      : null;
+
+    return {
+      estado: "disponivel",
+      adversario,
+      adversarioCanonico,
+      confrontoInedito,
+      baseCarregada,
+      baseFalhou,
+      mando,
+      timeEsquerda,
+      timeDireita,
+      spfcEsquerda,
+      competicaoRodada,
+      dataFormatada,
+      horario,
+      seloTemporal,
+      resumoHistorico,
+      atualizadoEmFormatado,
+    };
+  }
+
+  function createNextMatchSvgIcon(iconName) {
+    const svgNs = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(svgNs, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("width", "15");
+    svg.setAttribute("height", "15");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.setAttribute("aria-hidden", "true");
+
+    const pathsByIcon = {
+      calendar: [
+        "M8 2v4",
+        "M16 2v4",
+        "M3 10h18",
+        "M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z",
+      ],
+      clock: [
+        "M12 6v6l4 2",
+        "M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0z",
+      ],
+      arrowRight: [
+        "M5 12h14",
+        "M13 6l6 6-6 6",
+      ],
+    };
+
+    const paths = pathsByIcon[iconName] || [];
+    for (const d of paths) {
+      const path = document.createElementNS(svgNs, "path");
+      path.setAttribute("d", d);
+      svg.appendChild(path);
+    }
+    return svg;
+  }
+
+  function aplicarFiltroRetrospectoAdversario(canonicalOpponent) {
+    if (!dashboardReady || !canonicalOpponent) return;
+    const resolved = resolverAdversarioNaBase(canonicalOpponent, validOpponentClubs);
+    if (!resolved) return;
+
+    const oppSelect = dom["filter-opponent"];
+    if (oppSelect) {
+      const hasOption = Array.from(oppSelect.options).some((opt) => opt.value === resolved);
+      if (!hasOption) return;
+    }
+
+    state.seasonStart = minSeason;
+    state.seasonEnd = maxSeason;
+    state.opponent = resolved;
+    state.venue = "ALL";
+    state.tableResult = "ALL";
+    state.tableSearch = "";
+    state.tablePage = 1;
+    if (dom["table-search"]) {
+      dom["table-search"].value = "";
+    }
+
+    updateDashboard();
+
+    const scrollTarget = dom["filters-section"] || dom["dashboard-root"];
+    if (scrollTarget && typeof scrollTarget.scrollIntoView === "function") {
+      scrollTarget.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }
+
+  function renderNextMatchCard() {
+    const sectionEl = dom["next-match-section"];
+    const cardEl = dom["next-match-card"];
+    if (!sectionEl || !cardEl) return;
+
+    const modelo = montarModeloProximoJogo(nextMatchPayload, {
+      baseCarregada: dashboardReady,
+      baseFalhou: dashboardFailed,
+      clubsLookup: validOpponentClubs,
+      matches: allMatches,
+    });
+
+    if (modelo.estado === "oculto") {
+      sectionEl.classList.add("is-hidden");
+      cardEl.className = "next-match-card";
+      cardEl.replaceChildren();
+      return;
+    }
+
+    sectionEl.classList.remove("is-hidden");
+
+    if (modelo.estado === "sem_jogo") {
+      cardEl.className = "next-match-card next-match-card--empty";
+
+      const mainWrap = document.createElement("div");
+      mainWrap.className = "next-match-empty-main";
+
+      const kicker = document.createElement("h2");
+      kicker.id = "next-match-heading";
+      kicker.className = "next-match-kicker";
+      const dot = document.createElement("span");
+      dot.className = "next-match-dot";
+      dot.setAttribute("aria-hidden", "true");
+      kicker.appendChild(dot);
+      kicker.appendChild(document.createTextNode("Próximo jogo"));
+
+      const msgEl = document.createElement("p");
+      msgEl.className = "next-match-empty-text";
+      msgEl.textContent = modelo.mensagem;
+
+      mainWrap.appendChild(kicker);
+      mainWrap.appendChild(msgEl);
+
+      const children = [mainWrap];
+      if (modelo.atualizadoEmFormatado) {
+        const metaEl = document.createElement("span");
+        metaEl.className = "next-match-empty-meta";
+        metaEl.textContent = `Atualizado em ${modelo.atualizadoEmFormatado}`;
+        children.push(metaEl);
+      }
+
+      cardEl.replaceChildren(...children);
+      return;
+    }
+
+    // Estado 1: Próximo jogo disponível
+    cardEl.className = "next-match-card next-match-card--ready";
+
+    const infoCol = document.createElement("div");
+    infoCol.className = "next-match-info";
+
+    // Linha superior: kicker + competição/rodada + selo temporal
+    const metaTop = document.createElement("div");
+    metaTop.className = "next-match-meta-top";
+
+    const kicker = document.createElement("h2");
+    kicker.id = "next-match-heading";
+    kicker.className = "next-match-kicker";
+    const dot = document.createElement("span");
+    dot.className = "next-match-dot";
+    dot.setAttribute("aria-hidden", "true");
+    kicker.appendChild(dot);
+    kicker.appendChild(document.createTextNode("Próximo jogo"));
+    metaTop.appendChild(kicker);
+
+    const compEl = document.createElement("span");
+    compEl.className = "next-match-comp";
+    compEl.textContent = modelo.competicaoRodada;
+    metaTop.appendChild(compEl);
+
+    if (modelo.seloTemporal) {
+      const badgeEl = document.createElement("span");
+      badgeEl.className = `next-match-countdown next-match-countdown--${modelo.seloTemporal.tom}`;
+      badgeEl.textContent = modelo.seloTemporal.texto;
+      metaTop.appendChild(badgeEl);
+    }
+
+    infoCol.appendChild(metaTop);
+
+    // Linha principal: Confronto (Mandante × Visitante) + Badge de mando
+    const matchupRow = document.createElement("div");
+    matchupRow.className = "next-match-matchup";
+
+    const teamsEl = document.createElement("div");
+    teamsEl.className = "next-match-teams";
+
+    const leftTeamEl = document.createElement("span");
+    leftTeamEl.className = `next-match-team${modelo.spfcEsquerda ? " is-spfc" : ""}`;
+    leftTeamEl.textContent = modelo.timeEsquerda;
+
+    const vsEl = document.createElement("span");
+    vsEl.className = "next-match-vs";
+    vsEl.setAttribute("aria-hidden", "true");
+    vsEl.textContent = "×";
+
+    const rightTeamEl = document.createElement("span");
+    rightTeamEl.className = `next-match-team${!modelo.spfcEsquerda ? " is-spfc" : ""}`;
+    rightTeamEl.textContent = modelo.timeDireita;
+
+    teamsEl.appendChild(leftTeamEl);
+    teamsEl.appendChild(vsEl);
+    teamsEl.appendChild(rightTeamEl);
+    matchupRow.appendChild(teamsEl);
+
+    if (modelo.mando) {
+      const venueBadge = document.createElement("span");
+      const venueClass =
+        modelo.mando === "Casa" ? "next-match-venue--home" : "next-match-venue--away";
+      venueBadge.className = `next-match-venue ${venueClass}`;
+      venueBadge.textContent = modelo.mando;
+      venueBadge.setAttribute("aria-label", `Mando de campo: ${modelo.mando}`);
+      matchupRow.appendChild(venueBadge);
+    }
+
+    infoCol.appendChild(matchupRow);
+
+    // Linha de detalhes: Data + Horário
+    const detailsRow = document.createElement("div");
+    detailsRow.className = "next-match-details";
+
+    const dateItem = document.createElement("span");
+    dateItem.className = "next-match-detail-item";
+    dateItem.appendChild(createNextMatchSvgIcon("calendar"));
+    const dateText = document.createElement("span");
+    dateText.textContent = modelo.dataFormatada;
+    dateItem.appendChild(dateText);
+    detailsRow.appendChild(dateItem);
+
+    const timeItem = document.createElement("span");
+    timeItem.className = `next-match-detail-item${modelo.horario.definido ? "" : " is-tbd"}`;
+    timeItem.appendChild(createNextMatchSvgIcon("clock"));
+    const timeText = document.createElement("span");
+    timeText.textContent = modelo.horario.texto;
+    timeItem.appendChild(timeText);
+    detailsRow.appendChild(timeItem);
+
+    infoCol.appendChild(detailsRow);
+
+    // Mini resumo histórico na base (calculado em memória, sem chamadas extras)
+    if (modelo.resumoHistorico) {
+      const h2h = modelo.resumoHistorico;
+      const h2hEl = document.createElement("div");
+      h2hEl.className = "next-match-h2h";
+
+      const labelEl = document.createElement("span");
+      labelEl.className = "next-match-h2h-label";
+      labelEl.textContent = "Histórico na base:";
+      h2hEl.appendChild(labelEl);
+
+      const gamesEl = document.createElement("span");
+      gamesEl.className = "next-match-h2h-record";
+      gamesEl.textContent = `${fmtInt.format(h2h.games)} ${pluralizar(h2h.games, "jogo", "jogos")}`;
+      h2hEl.appendChild(gamesEl);
+
+      h2hEl.appendChild(document.createTextNode("·"));
+
+      const winEl = document.createElement("span");
+      winEl.className = "next-match-h2h-record next-match-h2h-win";
+      winEl.textContent = `${fmtInt.format(h2h.wins)}V`;
+      h2hEl.appendChild(winEl);
+
+      const drawEl = document.createElement("span");
+      drawEl.className = "next-match-h2h-record next-match-h2h-draw";
+      drawEl.textContent = `${fmtInt.format(h2h.draws)}E`;
+      h2hEl.appendChild(drawEl);
+
+      const lossEl = document.createElement("span");
+      lossEl.className = "next-match-h2h-record next-match-h2h-loss";
+      lossEl.textContent = `${fmtInt.format(h2h.losses)}D`;
+      h2hEl.appendChild(lossEl);
+
+      if (h2h.winrate !== null) {
+        const pctEl = document.createElement("span");
+        pctEl.textContent = `(${formatPct(h2h.winrate)})`;
+        h2hEl.appendChild(pctEl);
+      }
+
+      infoCol.appendChild(h2hEl);
+    }
+
+    // Coluna de ação direta (atalho para o retrospecto)
+    const actionCol = document.createElement("div");
+    actionCol.className = "next-match-action";
+
+    if (modelo.adversarioCanonico) {
+      const ctaBtn = document.createElement("button");
+      ctaBtn.type = "button";
+      ctaBtn.id = "btn-next-match-h2h";
+      ctaBtn.className = "next-match-cta";
+
+      const btnLabel = document.createElement("span");
+      btnLabel.textContent = `Ver retrospecto contra ${modelo.adversarioCanonico}`;
+      ctaBtn.appendChild(btnLabel);
+      ctaBtn.appendChild(createNextMatchSvgIcon("arrowRight"));
+
+      ctaBtn.addEventListener("click", () => {
+        aplicarFiltroRetrospectoAdversario(modelo.adversarioCanonico);
+      });
+      actionCol.appendChild(ctaBtn);
+    } else if (modelo.confrontoInedito) {
+      const disabledBtn = document.createElement("button");
+      disabledBtn.type = "button";
+      disabledBtn.id = "btn-next-match-h2h";
+      disabledBtn.className = "next-match-cta next-match-cta--disabled";
+      disabledBtn.disabled = true;
+      disabledBtn.setAttribute("aria-disabled", "true");
+      disabledBtn.title = "Ainda não há confrontos contra este clube na base dos pontos corridos";
+      disabledBtn.textContent = "Confronto inédito na base";
+      actionCol.appendChild(disabledBtn);
+    } else if (!modelo.baseCarregada && !modelo.baseFalhou) {
+      const loadingHint = document.createElement("span");
+      loadingHint.className = "next-match-loading-hint";
+      loadingHint.textContent = "Carregando histórico...";
+      actionCol.appendChild(loadingHint);
+    }
+
+    const cardChildren = [infoCol];
+    if (actionCol.childNodes.length > 0) {
+      cardChildren.push(actionCol);
+    }
+    cardEl.replaceChildren(...cardChildren);
+  }
+
+  async function fetchNextMatch() {
+    try {
+      const resp = await fetch(NEXT_MATCH_URL, { cache: "no-cache" });
+      if (!resp.ok) {
+        console.warn(
+          `[Dados Tricolor] Próximo jogo indisponível (HTTP ${resp.status}) em ${NEXT_MATCH_URL}.`
+        );
+        return { ok: false, data: null };
+      }
+      const data = await resp.json();
+      if (!data || typeof data !== "object" || Array.isArray(data)) {
+        console.warn(`[Dados Tricolor] Formato inválido em ${NEXT_MATCH_URL}.`);
+        return { ok: false, data: null };
+      }
+      return { ok: true, data };
+    } catch (err) {
+      console.warn(`[Dados Tricolor] Falha ao carregar ${NEXT_MATCH_URL}:`, err);
+      return { ok: false, data: null };
+    }
+  }
+
+  async function loadNextMatch() {
+    const result = await fetchNextMatch();
+    nextMatchPayload = result.ok ? result.data : null;
+    renderNextMatchCard();
+  }
+
   async function init() {
     cacheDom();
     configureChartDefaults();
+
+    // Carregamento independente e não bloqueante do card de Próximo Jogo
+    loadNextMatch();
 
     try {
       const [response, syncMeta] = await Promise.all([
@@ -3857,11 +4398,15 @@
       applyFiltersFromUrl();
       bindEvents();
 
+      dashboardReady = true;
       dom["state-loading"].classList.add("is-hidden");
       dom["dashboard-root"].classList.remove("is-hidden");
       updateDashboard();
       renderSeasonComparator();
+      renderNextMatchCard();
     } catch (error) {
+      dashboardFailed = true;
+      renderNextMatchCard();
       console.error("Erro ao inicializar Dados Tricolor:", error);
       dom["state-loading"].classList.add("is-hidden");
       dom["state-error"].classList.remove("is-hidden");
@@ -3882,6 +4427,13 @@
       resumirTemporada,
       compararTemporadas,
       calcularRecordesESequencias,
+      parseIsoCalendarDate,
+      formatarDataProximoJogo,
+      formatarHoraProximoJogo,
+      calcularSeloTemporalProximoJogo,
+      resolverAdversarioNaBase,
+      calcularResumoConfronto,
+      montarModeloProximoJogo,
     };
   }
 })();

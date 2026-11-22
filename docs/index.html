@@ -71,8 +71,19 @@
     </div>
   </header>
 
+  <!-- Card de Próximo Jogo (carregamento independente e não bloqueante) -->
+  <section
+    class="next-match-wrapper is-hidden"
+    id="next-match-section"
+    aria-labelledby="next-match-heading"
+  >
+    <div class="container">
+      <article class="next-match-card" id="next-match-card"></article>
+    </div>
+  </section>
+
   <!-- Barra de Filtros (sticky apenas no desktop via CSS) -->
-  <section class="filters-wrapper" aria-label="Filtros de análise">
+  <section class="filters-wrapper" id="filters-section" aria-label="Filtros de análise">
     <div class="container">
       <div class="filters-panel">
         <div class="filters-main-row">
