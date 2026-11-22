@@ -317,6 +317,15 @@ a:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
+.next-match-status-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  max-width: 100%;
+  min-width: 0;
+}
+
 .next-match-countdown {
   display: inline-flex;
   align-items: center;
@@ -337,6 +346,13 @@ a:focus-visible {
   color: #ffffff;
 }
 
+.next-match-countdown--live {
+  background-color: var(--spfc-black);
+  border-color: var(--spfc-red);
+  color: #ffffff;
+  letter-spacing: 0.015em;
+}
+
 .next-match-countdown--tomorrow {
   background-color: var(--spfc-red-soft);
   border-color: var(--spfc-red-border);
@@ -353,6 +369,13 @@ a:focus-visible {
   background-color: #fef3c7;
   border-color: rgba(202, 138, 4, 0.35);
   color: #92400e;
+}
+
+.next-match-status-note {
+  font-size: 0.73rem;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--ink-secondary);
 }
 
 .next-match-matchup {
@@ -596,6 +619,18 @@ a:focus-visible {
   .next-match-card {
     padding: 12px 13px;
     gap: 10px;
+  }
+
+  .next-match-meta-top {
+    gap: 5px 8px;
+  }
+
+  .next-match-status-group {
+    gap: 4px 6px;
+  }
+
+  .next-match-status-note {
+    font-size: 0.71rem;
   }
 
   .next-match-details {

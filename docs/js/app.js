@@ -13,6 +13,11 @@
   const TITULOS_SPFC = new Set([2006, 2007, 2008]);
   const WEEKDAYS_PT_SHORT = ["dom", "seg", "ter", "qua", "qui", "sex", "sáb"];
   const MS_PER_DAY = 86400000;
+  const MS_PER_MINUTE = 60000;
+  const BRT_OFFSET_MS = 3 * 60 * 60 * 1000;
+  const MATCH_WINDOW_MINUTES = 135;
+  const MATCH_LIVE_SUBTEXT = "Estatísticas entram após a partida";
+  const NEXT_MATCH_REFRESH_MS = 60000;
   const VALID_VENUES = new Map([
     ["casa", "Casa"],
     ["fora", "Fora"],
@@ -58,6 +63,7 @@
   let dashboardReady = false;
   let dashboardFailed = false;
   let nextMatchPayload = null;
+  let nextMatchStatusTimer = null;
   let shareFeedbackTimer = null;
 
   const state = {
@@ -3860,14 +3866,41 @@
     };
   }
 
-  function getLocalTodayIso(referenceDate = new Date()) {
-    const ref = referenceDate instanceof Date && !Number.isNaN(referenceDate.getTime())
-      ? referenceDate
-      : new Date();
-    const year = String(ref.getFullYear());
-    const month = String(ref.getMonth() + 1).padStart(2, "0");
-    const day = String(ref.getDate()).padStart(2, "0");
+  function getTodayIsoBRT(agoraMs = Date.now()) {
+    const ms = typeof agoraMs === "number" && Number.isFinite(agoraMs) ? agoraMs : Date.now();
+    const ref = new Date(ms);
+    try {
+      const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/Sao_Paulo",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).formatToParts(ref);
+      const year = parts.find((p) => p.type === "year")?.value;
+      const month = parts.find((p) => p.type === "month")?.value;
+      const day = parts.find((p) => p.type === "day")?.value;
+      if (year && month && day) {
+        return `${year}-${month}-${day}`;
+      }
+    } catch {
+      // Fallback explícito em UTC-3 (Brasília) caso Intl/timeZone não esteja disponível
+    }
+    const brtDate = new Date(ms - BRT_OFFSET_MS);
+    const year = String(brtDate.getUTCFullYear());
+    const month = String(brtDate.getUTCMonth() + 1).padStart(2, "0");
+    const day = String(brtDate.getUTCDate()).padStart(2, "0");
     return `${year}-${month}-${day}`;
+  }
+
+  function parseHoraValida(hora) {
+    if (typeof hora !== "string") return null;
+    const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(hora.trim());
+    if (!match) return null;
+    return {
+      horas: match[1],
+      minutos: match[2],
+      formatada: `${match[1]}:${match[2]}`,
+    };
   }
 
   function formatarDataProximoJogo(isoDate) {
@@ -3878,14 +3911,12 @@
   }
 
   function formatarHoraProximoJogo(hora, horarioDefinido) {
-    if (horarioDefinido === true && typeof hora === "string") {
-      const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(hora.trim());
-      if (match) {
-        return {
-          texto: `${match[1]}h${match[2]} (Brasília)`,
-          definido: true,
-        };
-      }
+    const horaValida = horarioDefinido === true ? parseHoraValida(hora) : null;
+    if (horaValida) {
+      return {
+        texto: `${horaValida.horas}h${horaValida.minutos} (Brasília)`,
+        definido: true,
+      };
     }
     return {
       texto: "Horário a definir",
@@ -3893,7 +3924,7 @@
     };
   }
 
-  function calcularSeloTemporalProximoJogo(isoDate, hojeIso = getLocalTodayIso()) {
+  function calcularSeloTemporalProximoJogo(isoDate, hojeIso = getTodayIsoBRT()) {
     const alvo = parseIsoCalendarDate(isoDate);
     const ref = parseIsoCalendarDate(hojeIso);
     if (!alvo || !ref) return null;
@@ -3909,6 +3940,109 @@
       return { texto: `Em ${fmtInt.format(diffDays)} dias`, tom: "upcoming", dias: diffDays };
     }
     return { texto: "Aguardando atualização do resultado", tom: "past", dias: diffDays };
+  }
+
+  function calcularEstadoTemporalJogo(jogo, agoraMs = Date.now()) {
+    if (!jogo || typeof jogo !== "object") return null;
+
+    const alvo = parseIsoCalendarDate(jogo.data);
+    if (!alvo) return null;
+
+    const msValido =
+      typeof agoraMs === "number" && Number.isFinite(agoraMs) ? agoraMs : Date.now();
+    const hojeBrtIso = getTodayIsoBRT(msValido);
+    const seloData = calcularSeloTemporalProximoJogo(jogo.data, hojeBrtIso);
+    if (!seloData) return null;
+
+    const ehHoje = seloData.dias === 0;
+    const horaValida = jogo.horario_definido === true ? parseHoraValida(jogo.hora) : null;
+
+    // Sem horário definido ou hora ausente/inválida: nunca exibir "Bola rolando"
+    if (!horaValida) {
+      const encerrado = seloData.dias < 0;
+      return {
+        estado: encerrado ? "aguardando" : ehHoje ? "hoje" : "futuro",
+        texto: seloData.texto,
+        subtexto: null,
+        tom: seloData.tom,
+        dias: seloData.dias,
+        minutosDecorridos: null,
+        emAndamento: false,
+        encerrado,
+        ehHoje,
+        deveAtualizar: ehHoje && !encerrado,
+      };
+    }
+
+    // Data (YYYY-MM-DD) e hora (HH:MM) válidas: timestamp explícito em Brasília (-03:00)
+    const dataIso = `${alvo.year}-${alvo.month}-${alvo.day}`;
+    const inicioMs = new Date(`${dataIso}T${horaValida.formatada}:00-03:00`).getTime();
+    if (!Number.isFinite(inicioMs)) {
+      const encerrado = seloData.dias < 0;
+      return {
+        estado: encerrado ? "aguardando" : ehHoje ? "hoje" : "futuro",
+        texto: seloData.texto,
+        subtexto: null,
+        tom: seloData.tom,
+        dias: seloData.dias,
+        minutosDecorridos: null,
+        emAndamento: false,
+        encerrado,
+        ehHoje,
+        deveAtualizar: ehHoje && !encerrado,
+      };
+    }
+
+    const minutosDecorridos = (msValido - inicioMs) / MS_PER_MINUTE;
+
+    // 1. Antes do apito inicial
+    if (minutosDecorridos < 0) {
+      const seloAntes =
+        seloData.dias < 0 ? { texto: "Hoje", tom: "today", dias: 0 } : seloData;
+      const antesHoje = seloAntes.dias === 0;
+      return {
+        estado: antesHoje ? "hoje" : "futuro",
+        texto: seloAntes.texto,
+        subtexto: null,
+        tom: seloAntes.tom,
+        dias: seloAntes.dias,
+        minutosDecorridos,
+        emAndamento: false,
+        encerrado: false,
+        ehHoje: antesHoje,
+        deveAtualizar: antesHoje,
+      };
+    }
+
+    // 2. Janela estimada da partida: 0 <= minutosDecorridos < 135 (início até +2h15min)
+    if (minutosDecorridos < MATCH_WINDOW_MINUTES) {
+      return {
+        estado: "em_andamento",
+        texto: "Bola rolando",
+        subtexto: MATCH_LIVE_SUBTEXT,
+        tom: "live",
+        dias: seloData.dias,
+        minutosDecorridos,
+        emAndamento: true,
+        encerrado: false,
+        ehHoje,
+        deveAtualizar: true,
+      };
+    }
+
+    // 3. Após 2h15min: aguardando atualização do pipeline
+    return {
+      estado: "aguardando",
+      texto: "Aguardando atualização do resultado",
+      subtexto: null,
+      tom: "past",
+      dias: seloData.dias,
+      minutosDecorridos,
+      emAndamento: false,
+      encerrado: true,
+      ehHoje,
+      deveAtualizar: false,
+    };
   }
 
   function resolverAdversarioNaBase(adversario, clubsLookup = validOpponentClubs) {
@@ -3983,10 +4117,33 @@
     const competicaoRodada = rodada ? `${competicao} · Rodada ${rodada}` : competicao;
 
     const horario = formatarHoraProximoJogo(pj.hora, pj.horario_definido);
-    const seloTemporal = calcularSeloTemporalProximoJogo(
-      pj.data,
-      opcoes.hojeIso || getLocalTodayIso()
-    );
+    let seloTemporal;
+    if (typeof opcoes.agoraMs === "number" && Number.isFinite(opcoes.agoraMs)) {
+      seloTemporal = calcularEstadoTemporalJogo(pj, opcoes.agoraMs);
+    } else if (typeof opcoes.hojeIso === "string" && opcoes.hojeIso.trim()) {
+      const seloLegado = calcularSeloTemporalProximoJogo(pj.data, opcoes.hojeIso);
+      seloTemporal = seloLegado
+        ? {
+            estado:
+              seloLegado.dias < 0
+                ? "aguardando"
+                : seloLegado.dias === 0
+                ? "hoje"
+                : "futuro",
+            texto: seloLegado.texto,
+            subtexto: null,
+            tom: seloLegado.tom,
+            dias: seloLegado.dias,
+            minutosDecorridos: null,
+            emAndamento: false,
+            encerrado: seloLegado.dias < 0,
+            ehHoje: seloLegado.dias === 0,
+            deveAtualizar: false,
+          }
+        : null;
+    } else {
+      seloTemporal = calcularEstadoTemporalJogo(pj, Date.now());
+    }
 
     const baseCarregada = Boolean(opcoes.baseCarregada);
     const baseFalhou = Boolean(opcoes.baseFalhou);
@@ -4016,6 +4173,11 @@
       dataFormatada,
       horario,
       seloTemporal,
+      jogoTemporal: {
+        data: pj.data,
+        hora: pj.hora,
+        horario_definido: pj.horario_definido,
+      },
       resumoHistorico,
       atualizadoEmFormatado,
     };
@@ -4090,10 +4252,77 @@
     }
   }
 
+  function stopNextMatchStatusTimer() {
+    if (nextMatchStatusTimer !== null) {
+      window.clearInterval(nextMatchStatusTimer);
+      nextMatchStatusTimer = null;
+    }
+  }
+
+  function applyNextMatchTemporalState(seloTemporal, elements) {
+    if (!seloTemporal || !elements) return;
+    const { badgeEl, noteEl } = elements;
+
+    if (badgeEl) {
+      const nextClassName = `next-match-countdown next-match-countdown--${seloTemporal.tom}`;
+      if (badgeEl.className !== nextClassName) {
+        badgeEl.className = nextClassName;
+      }
+      if (badgeEl.textContent !== seloTemporal.texto) {
+        badgeEl.textContent = seloTemporal.texto;
+      }
+    }
+
+    if (noteEl) {
+      const subtexto = typeof seloTemporal.subtexto === "string" ? seloTemporal.subtexto : "";
+      if (subtexto) {
+        if (noteEl.textContent !== subtexto) {
+          noteEl.textContent = subtexto;
+        }
+        noteEl.classList.remove("is-hidden");
+      } else {
+        if (noteEl.textContent !== "") {
+          noteEl.textContent = "";
+        }
+        noteEl.classList.add("is-hidden");
+      }
+    }
+  }
+
+  function scheduleNextMatchStatusRefresh(jogoTemporal, estadoInicial, elements) {
+    stopNextMatchStatusTimer();
+    if (
+      typeof window === "undefined" ||
+      !jogoTemporal ||
+      !estadoInicial ||
+      !estadoInicial.deveAtualizar
+    ) {
+      return;
+    }
+
+    nextMatchStatusTimer = window.setInterval(() => {
+      if (elements.badgeEl && !elements.badgeEl.isConnected) {
+        stopNextMatchStatusTimer();
+        return;
+      }
+      const proximoEstado = calcularEstadoTemporalJogo(jogoTemporal, Date.now());
+      if (!proximoEstado) {
+        stopNextMatchStatusTimer();
+        return;
+      }
+      applyNextMatchTemporalState(proximoEstado, elements);
+      if (!proximoEstado.deveAtualizar) {
+        stopNextMatchStatusTimer();
+      }
+    }, NEXT_MATCH_REFRESH_MS);
+  }
+
   function renderNextMatchCard() {
     const sectionEl = dom["next-match-section"];
     const cardEl = dom["next-match-card"];
     if (!sectionEl || !cardEl) return;
+
+    stopNextMatchStatusTimer();
 
     const modelo = montarModeloProximoJogo(nextMatchPayload, {
       baseCarregada: dashboardReady,
@@ -4170,11 +4399,28 @@
     compEl.textContent = modelo.competicaoRodada;
     metaTop.appendChild(compEl);
 
+    let statusBadgeEl = null;
+    let statusNoteEl = null;
+
     if (modelo.seloTemporal) {
-      const badgeEl = document.createElement("span");
-      badgeEl.className = `next-match-countdown next-match-countdown--${modelo.seloTemporal.tom}`;
-      badgeEl.textContent = modelo.seloTemporal.texto;
-      metaTop.appendChild(badgeEl);
+      const statusGroup = document.createElement("span");
+      statusGroup.className = "next-match-status-group";
+
+      statusBadgeEl = document.createElement("span");
+      statusBadgeEl.id = "next-match-countdown-badge";
+
+      statusNoteEl = document.createElement("span");
+      statusNoteEl.id = "next-match-status-note";
+      statusNoteEl.className = "next-match-status-note is-hidden";
+
+      applyNextMatchTemporalState(modelo.seloTemporal, {
+        badgeEl: statusBadgeEl,
+        noteEl: statusNoteEl,
+      });
+
+      statusGroup.appendChild(statusBadgeEl);
+      statusGroup.appendChild(statusNoteEl);
+      metaTop.appendChild(statusGroup);
     }
 
     infoCol.appendChild(metaTop);
@@ -4321,6 +4567,13 @@
       cardChildren.push(actionCol);
     }
     cardEl.replaceChildren(...cardChildren);
+
+    if (modelo.seloTemporal && statusBadgeEl && statusNoteEl) {
+      scheduleNextMatchStatusRefresh(modelo.jogoTemporal, modelo.seloTemporal, {
+        badgeEl: statusBadgeEl,
+        noteEl: statusNoteEl,
+      });
+    }
   }
 
   async function fetchNextMatch() {
@@ -4428,9 +4681,12 @@
       compararTemporadas,
       calcularRecordesESequencias,
       parseIsoCalendarDate,
+      getTodayIsoBRT,
+      parseHoraValida,
       formatarDataProximoJogo,
       formatarHoraProximoJogo,
       calcularSeloTemporalProximoJogo,
+      calcularEstadoTemporalJogo,
       resolverAdversarioNaBase,
       calcularResumoConfronto,
       montarModeloProximoJogo,
