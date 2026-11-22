@@ -32,3 +32,38 @@ jobs:
 
       - name: Executar suíte de qualidade de dados
         run: pytest -v
+
+  deploy:
+    name: Deploy no GitHub Pages
+    needs: data-quality
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Empacotar artefato do Pages (docs/)
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./docs
+
+      - name: Publicar no GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
