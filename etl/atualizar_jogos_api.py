@@ -838,14 +838,71 @@ def salvar_json_atomico(payload: dict[str, Any], destino: Path) -> None:
             tmp_path.unlink(missing_ok=True)
 
 
+def incremental_alterado(
+    anterior: dict[str, Any] | None,
+    novo: dict[str, Any],
+) -> bool:
+    """
+    Indica se `data/jogos_api_brasileirao.json` precisa ser reescrito.
+
+    Compara `partidas` e os metadados funcionais ignorando apenas
+    `metadata.atualizado_em`, evitando commits fantasma quando nenhum jogo
+    encerrado novo ou alterado entrou na base.
+    """
+    if not isinstance(anterior, dict):
+        return True
+    if anterior.get("partidas") != novo.get("partidas"):
+        return True
+    meta_anterior = anterior.get("metadata")
+    meta_novo = novo.get("metadata")
+    if not isinstance(meta_anterior, dict) or not isinstance(meta_novo, dict):
+        return True
+    atualizado_anterior = meta_anterior.get("atualizado_em")
+    if not isinstance(atualizado_anterior, str) or not atualizado_anterior.strip():
+        return True
+    meta_ant_funcional = {k: v for k, v in meta_anterior.items() if k != "atualizado_em"}
+    meta_novo_funcional = {k: v for k, v in meta_novo.items() if k != "atualizado_em"}
+    return meta_ant_funcional != meta_novo_funcional
+
+
+def proximo_jogo_alterado(
+    anterior: dict[str, Any] | None,
+    novo: dict[str, Any],
+    houve_novos_encerrados: bool = False,
+) -> bool:
+    """
+    Indica se `docs/data/proximo_jogo.json` precisa ser reescrito.
+
+    Retorna False quando o arquivo já existe em disco com schema válido,
+    não houve entrada/atualização de jogos encerrados na base e o conteúdo
+    funcional (`tem_proximo_jogo` e `proximo_jogo`) é exatamente igual ao
+    novo resultado da API — evitando commits fantasma só para alterar
+    `atualizado_em`.
+    """
+    if houve_novos_encerrados:
+        return True
+    if not isinstance(anterior, dict):
+        return True
+    if set(anterior.keys()) != {"atualizado_em", "tem_proximo_jogo", "proximo_jogo"}:
+        return True
+    atualizado_anterior = anterior.get("atualizado_em")
+    if not isinstance(atualizado_anterior, str) or not atualizado_anterior.strip():
+        return True
+    return (
+        anterior.get("tem_proximo_jogo") != novo.get("tem_proximo_jogo")
+        or anterior.get("proximo_jogo") != novo.get("proximo_jogo")
+    )
+
+
 def atualizar_jogos_api(
     temporada: int | None = None,
     caminho_incremental: Path = API_INCREMENTAL_PATH,
     caminho_proximo_jogo: Path = PROXIMO_JOGO_PATH,
+    agora_brt: datetime | None = None,
 ) -> dict[str, Any]:
     """Orquestra a coleta na football-data.org v4 e grava as saídas incrementais."""
     token = obter_api_key()
-    agora_brt = datetime.now(BRT)
+    referencia_brt = agora_brt.astimezone(BRT) if agora_brt else datetime.now(BRT)
 
     todos_matches = consultar_partidas_bsa(token, temporada=temporada)
     matches_spfc = filtrar_partidas_spfc(todos_matches)
@@ -879,18 +936,28 @@ def atualizar_jogos_api(
             "fonte": "football-data.org (v4 / BSA)",
             "clube": "São Paulo FC",
             "competicao": COMPETICAO_NOME,
-            "atualizado_em": agora_brt.isoformat(timespec="seconds"),
+            "atualizado_em": referencia_brt.isoformat(timespec="seconds"),
             "temporadas": temporadas_presentes,
             "total_partidas": len(partidas_mescladas),
         },
         "partidas": partidas_mescladas,
     }
-    salvar_json_atomico(payload_incremental, caminho_incremental)
+    incremental_gravado = incremental_alterado(anterior, payload_incremental)
+    if incremental_gravado:
+        salvar_json_atomico(payload_incremental, caminho_incremental)
 
-    # 2. Seleção e gravação do próximo jogo em docs/data/proximo_jogo.json
-    proximo = selecionar_proximo_jogo(matches_spfc, agora_brt=agora_brt)
-    payload_proximo = montar_payload_proximo_jogo(proximo, agora_brt=agora_brt)
-    salvar_json_atomico(payload_proximo, caminho_proximo_jogo)
+    # 2. Seleção e gravação idempotente do próximo jogo em docs/data/proximo_jogo.json
+    proximo = selecionar_proximo_jogo(matches_spfc, agora_brt=referencia_brt)
+    payload_proximo = montar_payload_proximo_jogo(proximo, agora_brt=referencia_brt)
+    proximo_anterior = carregar_json_seguro(caminho_proximo_jogo)
+    houve_novos_encerrados = qtd_novos > 0 or qtd_atualizados > 0
+    proximo_jogo_gravado = proximo_jogo_alterado(
+        proximo_anterior,
+        payload_proximo,
+        houve_novos_encerrados=houve_novos_encerrados,
+    )
+    if proximo_jogo_gravado:
+        salvar_json_atomico(payload_proximo, caminho_proximo_jogo)
 
     resumo = {
         "total_spfc_api": len(matches_spfc),
@@ -899,8 +966,10 @@ def atualizar_jogos_api(
         "total_incremental": len(partidas_mescladas),
         "novos_adicionados": qtd_novos,
         "atualizados": qtd_atualizados,
+        "incremental_gravado": incremental_gravado,
         "tem_proximo_jogo": payload_proximo["tem_proximo_jogo"],
         "proximo_jogo": proximo,
+        "proximo_jogo_gravado": proximo_jogo_gravado,
     }
     exibir_resumo(resumo, caminho_incremental, caminho_proximo_jogo)
     return resumo
@@ -918,23 +987,27 @@ def exibir_resumo(
     print(f"Partidas do SPFC retornadas pela API: {resumo['total_spfc_api']}")
     print(f"Jogos encerrados (FINISHED válidos):  {resumo['encerrados_api']}")
     print(f"Ignorados (em andamento/adiados):     {resumo['ignorados_status']}")
+    status_inc = "gravado" if resumo.get("incremental_gravado", True) else "sem alterações (mantido)"
     print(
         f"Base incremental ({caminho_incremental.name}): "
         f"{resumo['total_incremental']} jogo(s) "
-        f"(+{resumo['novos_adicionados']} novo(s), {resumo['atualizados']} atualizado(s))"
+        f"(+{resumo['novos_adicionados']} novo(s), {resumo['atualizados']} atualizado(s)) "
+        f"[{status_inc}]"
     )
+    status_prox = "gravado" if resumo.get("proximo_jogo_gravado", True) else "sem alterações (mantido)"
     proximo = resumo["proximo_jogo"]
     if proximo:
         hora_txt = proximo["hora"] if proximo["horario_definido"] else "A definir"
         print(
             f"Próximo jogo ({caminho_proximo_jogo.name}): "
             f"R{proximo['rodada']} | {proximo['data']} ({hora_txt}) | "
-            f"{proximo['mando']} vs {proximo['adversario']} [{proximo['status']}]"
+            f"{proximo['mando']} vs {proximo['adversario']} [{proximo['status']}] "
+            f"({status_prox})"
         )
     else:
         print(
             f"Próximo jogo ({caminho_proximo_jogo.name}): "
-            "nenhum jogo agendado no momento (tem_proximo_jogo=false)"
+            f"nenhum jogo agendado no momento (tem_proximo_jogo=false) ({status_prox})"
         )
     print("=" * 68)
 

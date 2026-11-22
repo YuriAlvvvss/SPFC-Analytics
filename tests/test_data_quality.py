@@ -1439,7 +1439,9 @@ def test_sincronizacao_etl_offline_e_com_api_incremental(
         assert meta_1["jogos_historico"] == len(dataset_historico["partidas"])
         assert meta_1["ultima_partida_data"] == "2026-01-28"
 
-        # 3. Segunda execução (idempotente)
+        # 3. Segunda execução (idempotente — não reescreve arquivos nem muda timestamps)
+        bytes_prod_antes = prod_dst.read_bytes()
+        bytes_meta_antes = meta_dst.read_bytes()
         payload_2, stats_2 = etl_mod.sincronizar_producao_com_historico(
             dataset_historico,
             destino_historico=hist_dst,
@@ -1450,3 +1452,171 @@ def test_sincronizacao_etl_offline_e_com_api_incremental(
         assert stats_2["novos_da_api"] == 0
         assert stats_2["duplicatas_ignoradas"] == 2
         assert payload_2["partidas"] == payload_1["partidas"]
+        assert prod_dst.read_bytes() == bytes_prod_antes
+        assert meta_dst.read_bytes() == bytes_meta_antes
+
+
+def test_api_idempotencia_contra_commits_fantasma(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Valida offline que `atualizar_jogos_api` evita commits fantasma:
+    1. Sem mudança nos encerrados nem em `(tem_proximo_jogo, proximo_jogo)`,
+       NÃO reescreve `proximo_jogo.json` nem `jogos_api_brasileirao.json` apenas
+       para atualizar `atualizado_em`.
+    2. Quando muda horário/status do próximo jogo, atualiza `proximo_jogo.json`
+       (inclusive `atualizado_em`) sem tocar em `jogos_api_brasileirao.json`.
+    3. Quando entra novo jogo encerrado na base, atualiza ambos os arquivos e
+       `atualizado_em` mesmo que o próximo jogo permaneça idêntico.
+    4. Em transição para fim de campeonato (`tem_proximo_jogo=False`), grava uma
+       vez e permanece idempotente nas execuções seguintes.
+    """
+    import tempfile
+
+    api_mod, _ = _importar_modulos_etl()
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp = Path(tmp_dir)
+        inc_path = tmp / "jogos_api_brasileirao.json"
+        prox_path = tmp / "proximo_jogo.json"
+
+        spfc_team = {"id": 1776, "name": "São Paulo FC", "shortName": "São Paulo"}
+        adv_flu = {"id": 1765, "name": "Fluminense FC", "shortName": "Fluminense"}
+        adv_bota = {"id": 1770, "name": "Botafogo FR", "shortName": "Botafogo"}
+        adv_remo = {"id": 9991, "name": "Clube do Remo", "shortName": "Remo"}
+
+        jogo_r35_encerrado = {
+            "id": 800035,
+            "utcDate": "2026-11-20T00:30:00Z",
+            "status": "FINISHED",
+            "matchday": 35,
+            "season": {"startDate": "2026-01-28"},
+            "homeTeam": spfc_team,
+            "awayTeam": adv_flu,
+            "score": {"fullTime": {"home": 2, "away": 0}},
+        }
+        jogo_r36_scheduled = {
+            "id": 800036,
+            "utcDate": "2026-11-24T00:00:00Z",
+            "status": "SCHEDULED",
+            "matchday": 36,
+            "season": {"startDate": "2026-01-28"},
+            "homeTeam": adv_bota,
+            "awayTeam": spfc_team,
+            "score": {"fullTime": {"home": None, "away": None}},
+        }
+
+        matches_correntes: list[dict[str, Any]] = [jogo_r35_encerrado, jogo_r36_scheduled]
+        monkeypatch.setattr(api_mod, "obter_api_key", lambda: "token-teste-offline")
+        monkeypatch.setattr(api_mod, "consultar_partidas_bsa", lambda token, temporada=None: list(matches_correntes))
+
+        # 1. Primeira execução: cria ambos os arquivos em t1
+        t1 = datetime(2026, 11, 22, 3, 0, 0, tzinfo=api_mod.BRT)
+        res_1 = api_mod.atualizar_jogos_api(
+            caminho_incremental=inc_path,
+            caminho_proximo_jogo=prox_path,
+            agora_brt=t1,
+        )
+        assert res_1["incremental_gravado"] is True
+        assert res_1["proximo_jogo_gravado"] is True
+        bytes_inc_t1 = inc_path.read_bytes()
+        bytes_prox_t1 = prox_path.read_bytes()
+        prox_t1 = _carregar_json_estrito(prox_path)
+        _validar_schema_proximo_jogo(prox_t1)
+        assert prox_t1["atualizado_em"] == t1.isoformat(timespec="seconds")
+        assert prox_t1["proximo_jogo"]["status"] == "SCHEDULED"
+        assert prox_t1["proximo_jogo"]["horario_definido"] is False
+
+        # 2. Segunda execução (t2 posterior, mesma resposta da API): ZERO reescrita
+        t2 = datetime(2026, 11, 23, 3, 0, 0, tzinfo=api_mod.BRT)
+        res_2 = api_mod.atualizar_jogos_api(
+            caminho_incremental=inc_path,
+            caminho_proximo_jogo=prox_path,
+            agora_brt=t2,
+        )
+        assert res_2["novos_adicionados"] == 0
+        assert res_2["atualizados"] == 0
+        assert res_2["incremental_gravado"] is False
+        assert res_2["proximo_jogo_gravado"] is False
+        assert inc_path.read_bytes() == bytes_inc_t1
+        assert prox_path.read_bytes() == bytes_prox_t1
+        assert _carregar_json_estrito(prox_path)["atualizado_em"] == t1.isoformat(timespec="seconds")
+
+        # 3. Mudança real de status/horário no próximo jogo (SCHEDULED -> TIMED 20:00 BRT):
+        #    reescreve apenas proximo_jogo.json; mantém jogos_api_brasileirao.json intacto.
+        jogo_r36_timed = dict(jogo_r36_scheduled, utcDate="2026-11-24T23:00:00Z", status="TIMED")
+        matches_correntes = [jogo_r35_encerrado, jogo_r36_timed]
+        t3 = datetime(2026, 11, 23, 15, 0, 0, tzinfo=api_mod.BRT)
+        res_3 = api_mod.atualizar_jogos_api(
+            caminho_incremental=inc_path,
+            caminho_proximo_jogo=prox_path,
+            agora_brt=t3,
+        )
+        assert res_3["incremental_gravado"] is False
+        assert res_3["proximo_jogo_gravado"] is True
+        assert inc_path.read_bytes() == bytes_inc_t1
+        prox_t3 = _carregar_json_estrito(prox_path)
+        _validar_schema_proximo_jogo(prox_t3)
+        assert prox_t3["atualizado_em"] == t3.isoformat(timespec="seconds")
+        assert prox_t3["proximo_jogo"]["status"] == "TIMED"
+        assert prox_t3["proximo_jogo"]["hora"] == "20:00"
+        assert prox_t3["proximo_jogo"]["horario_definido"] is True
+
+        # 4. Novo jogo encerrado (jogo adiado da R34 finalizado), mesmo próximo jogo R36:
+        #    reescreve ambos os arquivos e atualiza `atualizado_em` em ambos.
+        jogo_r34_adiado_encerrado = {
+            "id": 800034,
+            "utcDate": "2026-11-16T22:00:00Z",
+            "status": "FINISHED",
+            "matchday": 34,
+            "season": {"startDate": "2026-01-28"},
+            "homeTeam": spfc_team,
+            "awayTeam": adv_remo,
+            "score": {"fullTime": {"home": 3, "away": 1}},
+        }
+        matches_correntes = [jogo_r34_adiado_encerrado, jogo_r35_encerrado, jogo_r36_timed]
+        t4 = datetime(2026, 11, 24, 3, 0, 0, tzinfo=api_mod.BRT)
+        res_4 = api_mod.atualizar_jogos_api(
+            caminho_incremental=inc_path,
+            caminho_proximo_jogo=prox_path,
+            agora_brt=t4,
+        )
+        assert res_4["novos_adicionados"] == 1
+        assert res_4["incremental_gravado"] is True
+        assert res_4["proximo_jogo_gravado"] is True
+        assert _carregar_json_estrito(inc_path)["metadata"]["atualizado_em"] == t4.isoformat(timespec="seconds")
+        assert _carregar_json_estrito(prox_path)["atualizado_em"] == t4.isoformat(timespec="seconds")
+
+        # 5. Fim de campeonato (sem próximos jogos): grava na transição e depois estabiliza
+        jogo_r36_encerrado = dict(
+            jogo_r36_timed,
+            status="FINISHED",
+            score={"fullTime": {"home": 1, "away": 2}},
+        )
+        matches_correntes = [jogo_r34_adiado_encerrado, jogo_r35_encerrado, jogo_r36_encerrado]
+        t5 = datetime(2026, 11, 25, 3, 0, 0, tzinfo=api_mod.BRT)
+        res_5 = api_mod.atualizar_jogos_api(
+            caminho_incremental=inc_path,
+            caminho_proximo_jogo=prox_path,
+            agora_brt=t5,
+        )
+        assert res_5["incremental_gravado"] is True
+        assert res_5["proximo_jogo_gravado"] is True
+        prox_t5 = _carregar_json_estrito(prox_path)
+        _validar_schema_proximo_jogo(prox_t5)
+        assert prox_t5["tem_proximo_jogo"] is False
+        assert prox_t5["proximo_jogo"] is None
+        bytes_inc_t5 = inc_path.read_bytes()
+        bytes_prox_t5 = prox_path.read_bytes()
+
+        # Nova execução na entressafra (t6): zero reescrita
+        t6 = datetime(2026, 11, 26, 3, 0, 0, tzinfo=api_mod.BRT)
+        res_6 = api_mod.atualizar_jogos_api(
+            caminho_incremental=inc_path,
+            caminho_proximo_jogo=prox_path,
+            agora_brt=t6,
+        )
+        assert res_6["incremental_gravado"] is False
+        assert res_6["proximo_jogo_gravado"] is False
+        assert inc_path.read_bytes() == bytes_inc_t5
+        assert prox_path.read_bytes() == bytes_prox_t5

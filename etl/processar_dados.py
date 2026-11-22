@@ -851,6 +851,27 @@ def sincronizar_meta_json(
     salvar_json(novo_meta, destino_meta)
 
 
+def _dataset_producao_alterado(
+    atual: dict[str, Any] | None,
+    novo: dict[str, Any],
+) -> bool:
+    """Compara o dataset atual e o novo ignorando apenas `metadata.gerado_em`."""
+    if not isinstance(atual, dict):
+        return True
+    if atual.get("partidas") != novo.get("partidas"):
+        return True
+    meta_atual = atual.get("metadata")
+    meta_novo = novo.get("metadata")
+    if not isinstance(meta_atual, dict) or not isinstance(meta_novo, dict):
+        return True
+    gerado_atual = meta_atual.get("gerado_em")
+    if not isinstance(gerado_atual, str) or not gerado_atual.strip():
+        return True
+    meta_ant_funcional = {k: v for k, v in meta_atual.items() if k != "gerado_em"}
+    meta_novo_funcional = {k: v for k, v in meta_novo.items() if k != "gerado_em"}
+    return meta_ant_funcional != meta_novo_funcional
+
+
 def sincronizar_producao_com_historico(
     historico_payload: dict[str, Any],
     destino_historico: Path = HISTORICO_PATH,
@@ -873,6 +894,7 @@ def sincronizar_producao_com_historico(
     partidas_historicas = historico_payload["partidas"]
     temp_fim_hist = int(historico_payload["metadata"]["temporada_fim"])
 
+    prod_atual: dict[str, Any] | None = None
     partidas_posteriores: list[dict[str, Any]] = []
     meta_producao_existente: dict[str, Any] = {}
     if destino_producao.exists():
@@ -893,9 +915,13 @@ def sincronizar_producao_com_historico(
     stats_merge["arquivo_api_existe"] = arquivo_api_existe
 
     if len(todas_partidas) == len(partidas_historicas) and not partidas_posteriores:
-        salvar_json(historico_payload, destino_producao)
-        sincronizar_meta_json(historico_payload, destino_meta=destino_meta, novos_da_api=0)
-        return historico_payload, stats_merge
+        if _dataset_producao_alterado(prod_atual, historico_payload):
+            salvar_json(historico_payload, destino_producao)
+            payload_final = historico_payload
+        else:
+            payload_final = prod_atual  # type: ignore[assignment]
+        sincronizar_meta_json(payload_final, destino_meta=destino_meta, novos_da_api=0)
+        return payload_final, stats_merge
 
     temporadas_cartoes = sorted(
         {
@@ -911,6 +937,14 @@ def sincronizar_producao_com_historico(
         {p["temporada"] for p in todas_partidas if p.get("chutes") is not None}
     )
 
+    gerado_em_novo = (
+        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if stats_merge["novos_da_api"] > 0
+        else str(
+            meta_producao_existente.get("gerado_em")
+            or historico_payload["metadata"]["gerado_em"]
+        )
+    )
     meta_prod = dict(meta_producao_existente or historico_payload["metadata"])
     meta_prod.update(
         {
@@ -920,12 +954,15 @@ def sincronizar_producao_com_historico(
             "temporadas_com_cartoes": temporadas_cartoes,
             "temporadas_com_gols": temporadas_gols,
             "temporadas_com_estatisticas": temporadas_stats,
-            "gerado_em": historico_payload["metadata"]["gerado_em"],
+            "gerado_em": gerado_em_novo,
         }
     )
 
     payload_producao = {"metadata": meta_prod, "partidas": todas_partidas}
-    salvar_json(payload_producao, destino_producao)
+    if _dataset_producao_alterado(prod_atual, payload_producao):
+        salvar_json(payload_producao, destino_producao)
+    else:
+        payload_producao = prod_atual  # type: ignore[assignment]
     sincronizar_meta_json(
         payload_producao,
         destino_meta=destino_meta,
