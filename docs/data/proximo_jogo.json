@@ -1,0 +1,15 @@
+{
+  "atualizado_em": "2026-11-22T14:16:09-03:00",
+  "tem_proximo_jogo": true,
+  "proximo_jogo": {
+    "data": "2026-11-23",
+    "hora": "20:00",
+    "horario_definido": true,
+    "adversario": "Botafogo",
+    "mando": "Fora",
+    "rodada": 36,
+    "temporada": 2026,
+    "competicao": "Brasileirão Série A",
+    "status": "TIMED"
+  }
+}

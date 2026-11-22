@@ -11,22 +11,45 @@ exporta o arquivo limpo para `docs/data/spfc_pontos_corridos.json`.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
     import pandas as pd
-except ModuleNotFoundError:  # Permite executar --patch-json sem pandas instalado
+except ModuleNotFoundError:  # Permite executar --patch-json / merge sem pandas instalado
     pd = None  # type: ignore[assignment]
+
+try:
+    from etl.atualizar_jogos_api import (
+        ARENA_CASA_SPFC,
+        ARENA_FORA_FALLBACK,
+        ARENAS_PADRAO_POR_CLUBE,
+        ESTADOS_TIMES,
+    )
+except ModuleNotFoundError:
+    from atualizar_jogos_api import (  # type: ignore[no-redef]
+        ARENA_CASA_SPFC,
+        ARENA_FORA_FALLBACK,
+        ARENAS_PADRAO_POR_CLUBE,
+        ESTADOS_TIMES,
+    )
 
 # Caminhos do projeto (relativos ao repositório, independentes do diretório atual)
 BASE_DIR = Path(__file__).resolve().parent.parent
 RAW_DIR = BASE_DIR / "data" / "raw"
 HISTORICO_PATH = BASE_DIR / "data" / "historico_2003_2025.json"
+API_INCREMENTAL_PATH = BASE_DIR / "data" / "jogos_api_brasileirao.json"
 OUTPUT_PATH = BASE_DIR / "docs" / "data" / "spfc_pontos_corridos.json"
+META_PATH = BASE_DIR / "docs" / "data" / "meta.json"
+
+try:
+    BRT = ZoneInfo("America/Sao_Paulo")
+except ZoneInfoNotFoundError:
+    BRT = timezone(timedelta(hours=-3))
 
 ARQUIVO_PARTIDAS = RAW_DIR / "campeonato-brasileiro-full.csv"
 ARQUIVO_CARTOES = RAW_DIR / "campeonato-brasileiro-cartoes.csv"
@@ -564,17 +587,288 @@ def salvar_json(payload: dict[str, Any], destino: Path = OUTPUT_PATH) -> None:
             tmp_path.unlink(missing_ok=True)
 
 
+def _limpar_str_puro(valor: Any) -> str | None:
+    """Limpeza textual sem dependência de pandas para uso no merge incremental."""
+    if valor is None:
+        return None
+    texto = " ".join(str(valor).replace("\xa0", " ").split())
+    if not texto or texto == "-":
+        return None
+    if "Ã" in texto or "Â" in texto:
+        try:
+            texto = texto.encode("latin-1").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
+    return texto
+
+
+def normalizar_partida_api_para_schema_v1(partida: dict[str, Any]) -> dict[str, Any]:
+    """
+    Converte/padroniza uma partida vinda de `data/jogos_api_brasileirao.json`
+    para o schema v1 exato de 29 chaves, preenchendo de forma coerente os campos
+    obrigatórios não fornecidos pela API (como `arena` e campos derivados).
+    """
+    adversario_raw = _limpar_str_puro(partida.get("adversario")) or ""
+    adversario = NOMES_CLUBES.get(adversario_raw, adversario_raw)
+    mando = _limpar_str_puro(partida.get("mando")) or "Casa"
+
+    adversario_estado = (
+        _limpar_str_puro(partida.get("adversario_estado"))
+        or ESTADOS_TIMES.get(adversario)
+    )
+
+    arena = _limpar_str_puro(partida.get("arena"))
+    if not arena:
+        arena = (
+            ARENA_CASA_SPFC
+            if mando == "Casa"
+            else ARENAS_PADRAO_POR_CLUBE.get(adversario, ARENA_FORA_FALLBACK)
+        )
+
+    hora = _limpar_str_puro(partida.get("hora")) or "00:00"
+    gols_pro = int(partida["gols_pro"])
+    gols_contra = int(partida["gols_contra"])
+    saldo_gols = gols_pro - gols_contra
+
+    if gols_pro > gols_contra:
+        resultado, pontos = "V", 3
+    elif gols_pro < gols_contra:
+        resultado, pontos = "D", 0
+    else:
+        resultado, pontos = "E", 1
+
+    return {
+        "id": int(partida["id"]),
+        "temporada": int(partida["temporada"]),
+        "rodada": int(partida["rodada"]),
+        "data": str(partida["data"]),
+        "hora": hora,
+        "mando": mando,
+        "adversario": adversario,
+        "adversario_estado": adversario_estado,
+        "arena": arena,
+        "gols_pro": gols_pro,
+        "gols_contra": gols_contra,
+        "saldo_gols": saldo_gols,
+        "resultado": resultado,
+        "pontos": pontos,
+        "tecnico_spfc": _limpar_str_puro(partida.get("tecnico_spfc")),
+        "formacao_spfc": _limpar_str_puro(partida.get("formacao_spfc")),
+        "cartoes_amarelos": partida.get("cartoes_amarelos"),
+        "cartoes_vermelhos": partida.get("cartoes_vermelhos"),
+        "cartoes_amarelos_adversario": partida.get("cartoes_amarelos_adversario"),
+        "cartoes_vermelhos_adversario": partida.get("cartoes_vermelhos_adversario"),
+        "gols": partida.get("gols"),
+        "chutes": partida.get("chutes"),
+        "chutes_no_alvo": partida.get("chutes_no_alvo"),
+        "posse_de_bola": partida.get("posse_de_bola"),
+        "passes": partida.get("passes"),
+        "precisao_passes": partida.get("precisao_passes"),
+        "faltas": partida.get("faltas"),
+        "escanteios": partida.get("escanteios"),
+        "impedimentos": partida.get("impedimentos"),
+    }
+
+
+def carregar_partidas_api_incremental(
+    caminho_api: Path = API_INCREMENTAL_PATH,
+) -> tuple[list[dict[str, Any]], bool]:
+    """
+    Carrega partidas encerradas do arquivo incremental da API (football-data.org).
+
+    Retorna `(partidas, arquivo_existe)`. Quando o arquivo não existe, retorna
+    `([], False)` para que o ETL continue funcionando normalmente offline.
+    """
+    if not caminho_api.exists():
+        return [], False
+
+    with caminho_api.open("r", encoding="utf-8") as arquivo:
+        dados = json.load(arquivo)
+
+    if isinstance(dados, dict) and isinstance(dados.get("partidas"), list):
+        return list(dados["partidas"]), True
+    if isinstance(dados, list):
+        return list(dados), True
+    return [], True
+
+
+def mesclar_partidas_deterministico(
+    partidas_historicas: list[dict[str, Any]],
+    partidas_api: list[dict[str, Any]],
+    partidas_posteriores_existentes: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """
+    Faz merge determinístico e idempotente entre base histórica (prioridade 1),
+    partidas pós-histórico já existentes em produção (prioridade 2, ex.: ESPN)
+    e partidas incrementais da API football-data.org (prioridade 3).
+
+    Deduplica pelas chaves naturais do campeonato:
+    - `(temporada, rodada)`
+    - `(data, adversario)`
+    - `(temporada, mando, adversario)`
+    - `data` (o clube não disputa dois jogos oficiais no mesmo dia)
+
+    Garante IDs únicos e ordenação cronológica estrita por `(temporada, data, id)`.
+    """
+    resultado: list[dict[str, Any]] = []
+    ids_usados: set[int] = set()
+    chaves_temp_rod: set[tuple[int, int]] = set()
+    chaves_data_adv: set[tuple[str, str]] = set()
+    chaves_confronto: set[tuple[int, str, str]] = set()
+    chaves_data: set[str] = set()
+
+    def _registrar(p: dict[str, Any]) -> None:
+        resultado.append(p)
+        ids_usados.add(int(p["id"]))
+        chaves_temp_rod.add((int(p["temporada"]), int(p["rodada"])))
+        chaves_data_adv.add((str(p["data"]), str(p["adversario"])))
+        chaves_confronto.add((int(p["temporada"]), str(p["mando"]), str(p["adversario"])))
+        chaves_data.add(str(p["data"]))
+
+    def _eh_duplicata(p: dict[str, Any]) -> bool:
+        return (
+            (int(p["temporada"]), int(p["rodada"])) in chaves_temp_rod
+            or (str(p["data"]), str(p["adversario"])) in chaves_data_adv
+            or (int(p["temporada"]), str(p["mando"]), str(p["adversario"])) in chaves_confronto
+            or str(p["data"]) in chaves_data
+        )
+
+    # 1. Base histórica congelada (intacta)
+    for p in partidas_historicas:
+        _registrar(dict(p))
+
+    # 2. Partidas pós-histórico já presentes em produção (ex.: ESPN com gols/cartões/stats)
+    for p in sorted(
+        partidas_posteriores_existentes or [],
+        key=lambda item: (int(item["temporada"]), str(item["data"]), int(item["id"])),
+    ):
+        if _eh_duplicata(p):
+            continue
+        registro = dict(p)
+        if int(registro["id"]) in ids_usados:
+            novo_id = 900_000_000 + int(registro["id"])
+            while novo_id in ids_usados:
+                novo_id += 1
+            registro["id"] = novo_id
+        _registrar(registro)
+
+    # 3. Partidas incrementais da API football-data.org (apenas o que ainda não existe)
+    novos_da_api = 0
+    duplicatas_ignoradas = 0
+    api_ordenadas = sorted(
+        partidas_api,
+        key=lambda item: (int(item["temporada"]), str(item["data"]), int(item["id"])),
+    )
+    for item_api in api_ordenadas:
+        registro = normalizar_partida_api_para_schema_v1(item_api)
+        if _eh_duplicata(registro):
+            duplicatas_ignoradas += 1
+            continue
+
+        if int(registro["id"]) in ids_usados:
+            novo_id = 900_000_000 + int(registro["id"])
+            while novo_id in ids_usados:
+                novo_id += 1
+            registro["id"] = novo_id
+
+        _registrar(registro)
+        novos_da_api += 1
+
+    resultado.sort(key=lambda p: (int(p["temporada"]), str(p["data"]), int(p["id"])))
+    stats = {
+        "lidos_da_api": len(partidas_api),
+        "novos_da_api": novos_da_api,
+        "duplicatas_ignoradas": duplicatas_ignoradas,
+    }
+    return resultado, stats
+
+
+def sincronizar_meta_json(
+    payload_producao: dict[str, Any],
+    destino_meta: Path = META_PATH,
+    novos_da_api: int = 0,
+) -> None:
+    """
+    Mantém `docs/data/meta.json` consistente com `docs/data/spfc_pontos_corridos.json`.
+
+    Só regrava o arquivo quando ele não existe, quando houve novos jogos incorporados
+    da API ou quando algum contador/data divergir do dataset de produção.
+    """
+    partidas = payload_producao["partidas"]
+    meta_prod = payload_producao["metadata"]
+    temp_inicio = int(meta_prod["temporada_inicio"])
+    temp_fim = int(meta_prod["temporada_fim"])
+    temp_atual = temp_fim
+    total_jogos = len(partidas)
+    jogos_temp_atual = sum(1 for p in partidas if int(p["temporada"]) == temp_atual)
+    jogos_historico = sum(1 for p in partidas if int(p["temporada"]) < temp_atual)
+    ultima_partida_data = max(str(p["data"]) for p in partidas)
+
+    meta_atual: dict[str, Any] | None = None
+    if destino_meta.exists():
+        with destino_meta.open("r", encoding="utf-8") as arquivo:
+            meta_atual = json.load(arquivo)
+
+    campos_consistentes = (
+        isinstance(meta_atual, dict)
+        and meta_atual.get("temporada_inicio") == temp_inicio
+        and meta_atual.get("temporada_fim") == temp_fim
+        and meta_atual.get("temporada_atual") == temp_atual
+        and meta_atual.get("total_jogos") == total_jogos
+        and meta_atual.get("jogos_historico") == jogos_historico
+        and meta_atual.get("jogos_temporada_atual") == jogos_temp_atual
+        and meta_atual.get("ultima_partida_data") == ultima_partida_data
+    )
+
+    if campos_consistentes and novos_da_api == 0:
+        return
+
+    agora_brt = datetime.now(BRT)
+    fonte_anterior = str((meta_atual or {}).get("fonte_atualizacao") or "").strip()
+    if novos_da_api > 0:
+        if "football-data.org" in fonte_anterior:
+            fonte_atualizacao = fonte_anterior
+        elif fonte_anterior:
+            fonte_atualizacao = f"{fonte_anterior} + football-data.org (v4 / BSA)"
+        else:
+            fonte_atualizacao = "football-data.org (v4 / BSA)"
+    else:
+        fonte_atualizacao = fonte_anterior or "Kaggle + ETL Dados Tricolor"
+
+    novo_meta = {
+        "atualizado_em": agora_brt.isoformat(timespec="seconds"),
+        "atualizado_em_brt": agora_brt.strftime("%d/%m/%Y às %H:%M"),
+        "fuso_horario": "America/Sao_Paulo",
+        "temporada_inicio": temp_inicio,
+        "temporada_fim": temp_fim,
+        "temporada_atual": temp_atual,
+        "total_jogos": total_jogos,
+        "jogos_historico": jogos_historico,
+        "jogos_temporada_atual": jogos_temp_atual,
+        "ultima_partida_data": ultima_partida_data,
+        "fonte_atualizacao": fonte_atualizacao,
+    }
+    salvar_json(novo_meta, destino_meta)
+
+
 def sincronizar_producao_com_historico(
     historico_payload: dict[str, Any],
     destino_historico: Path = HISTORICO_PATH,
     destino_producao: Path = OUTPUT_PATH,
-) -> dict[str, Any]:
+    caminho_api: Path = API_INCREMENTAL_PATH,
+    destino_meta: Path = META_PATH,
+    salvar_historico: bool = True,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """
     Salva a base histórica congelada (`data/historico_2003_2025.json`) e regenera
-    `docs/data/spfc_pontos_corridos.json` preservando eventuais partidas de temporadas
-    posteriores (ex.: 2026+ importadas pela API ESPN) em ordem cronológica estrita.
+    `docs/data/spfc_pontos_corridos.json` integrando:
+    1. Base histórica congelada (2003–2025)
+    2. Partidas de temporadas posteriores já presentes em produção (ex.: ESPN)
+    3. Partidas encerradas do arquivo incremental da API (`data/jogos_api_brasileirao.json`),
+       caso exista (continuando 100% funcional offline quando ausente).
     """
-    salvar_json(historico_payload, destino_historico)
+    if salvar_historico:
+        salvar_json(historico_payload, destino_historico)
 
     partidas_historicas = historico_payload["partidas"]
     temp_fim_hist = int(historico_payload["metadata"]["temporada_fim"])
@@ -590,14 +884,18 @@ def sincronizar_producao_com_historico(
             ]
             meta_producao_existente = dict(prod_atual.get("metadata") or {})
 
-    if not partidas_posteriores:
-        salvar_json(historico_payload, destino_producao)
-        return historico_payload
-
-    todas_partidas = sorted(
-        partidas_historicas + partidas_posteriores,
-        key=lambda p: (int(p["temporada"]), str(p["data"]), int(p["id"])),
+    partidas_api, arquivo_api_existe = carregar_partidas_api_incremental(caminho_api)
+    todas_partidas, stats_merge = mesclar_partidas_deterministico(
+        partidas_historicas=partidas_historicas,
+        partidas_api=partidas_api,
+        partidas_posteriores_existentes=partidas_posteriores,
     )
+    stats_merge["arquivo_api_existe"] = arquivo_api_existe
+
+    if len(todas_partidas) == len(partidas_historicas) and not partidas_posteriores:
+        salvar_json(historico_payload, destino_producao)
+        sincronizar_meta_json(historico_payload, destino_meta=destino_meta, novos_da_api=0)
+        return historico_payload, stats_merge
 
     temporadas_cartoes = sorted(
         {
@@ -628,15 +926,20 @@ def sincronizar_producao_com_historico(
 
     payload_producao = {"metadata": meta_prod, "partidas": todas_partidas}
     salvar_json(payload_producao, destino_producao)
-    return payload_producao
+    sincronizar_meta_json(
+        payload_producao,
+        destino_meta=destino_meta,
+        novos_da_api=stats_merge["novos_da_api"],
+    )
+    return payload_producao, stats_merge
 
 
-def aplicar_patch_datas_base_existente() -> dict[str, Any]:
+def aplicar_patch_datas_base_existente() -> tuple[dict[str, Any], dict[str, Any]]:
     """
     Aplica `CORRECOES_DATAS_POR_ID` e reordenação cronológica diretamente sobre a
     base histórica congelada (`data/historico_2003_2025.json`) e sincroniza o
-    arquivo final de produção (`docs/data/spfc_pontos_corridos.json`), sem exigir
-    os CSVs brutos do Kaggle (ignorados no `.gitignore`).
+    arquivo final de produção (`docs/data/spfc_pontos_corridos.json`) com
+    eventuais jogos incrementais da API, sem exigir os CSVs brutos do Kaggle.
     """
     if not HISTORICO_PATH.exists():
         raise FileNotFoundError(
@@ -649,19 +952,40 @@ def aplicar_patch_datas_base_existente() -> dict[str, Any]:
     partidas_corrigidas, qtd_alteradas = aplicar_correcoes_datas_partidas(
         historico_payload["partidas"]
     )
-    historico_payload["partidas"] = partidas_corrigidas
-    historico_payload["metadata"]["gerado_em"] = datetime.now(timezone.utc).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
+    houve_alteracao_hist = qtd_alteradas > 0 or partidas_corrigidas != historico_payload["partidas"]
+    if houve_alteracao_hist:
+        historico_payload["partidas"] = partidas_corrigidas
+        historico_payload["metadata"]["gerado_em"] = datetime.now(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
 
     print(
-        f"[PATCH] Correções de datas aplicadas via CORRECOES_DATAS_POR_ID: "
-        f"{qtd_alteradas} partida(s) atualizada(s) e reordenadas cronologicamente."
+        f"[PATCH] Correções de datas verificadas via CORRECOES_DATAS_POR_ID: "
+        f"{qtd_alteradas} partida(s) atualizada(s)."
     )
-    return sincronizar_producao_com_historico(historico_payload)
+    return sincronizar_producao_com_historico(
+        historico_payload,
+        salvar_historico=houve_alteracao_hist,
+    )
 
 
-def exibir_resumo(payload: dict[str, Any]) -> None:
+def csvs_kaggle_disponiveis() -> bool:
+    """Retorna True se pandas e os 4 CSVs originais do Kaggle estiverem disponíveis."""
+    if pd is None:
+        return False
+    obrigatorios = (
+        ARQUIVO_PARTIDAS,
+        ARQUIVO_CARTOES,
+        ARQUIVO_ESTATISTICAS,
+        ARQUIVO_GOLS,
+    )
+    return all(arq.exists() for arq in obrigatorios)
+
+
+def exibir_resumo(
+    payload: dict[str, Any],
+    stats_merge: dict[str, Any] | None = None,
+) -> None:
     """Imprime um resumo de validação dos dados processados."""
     meta = payload["metadata"]
     partidas = payload["partidas"]
@@ -707,15 +1031,27 @@ def exibir_resumo(payload: dict[str, Any]) -> None:
         f"Gols detalhados:   {len(todos_gols)} gols ({len(todos_gols) - gols_contra_favor} de atletas SPFC, "
         f"{gols_penalti} de pênalti, {gols_contra_favor} gols contra a favor | {len(contagem_artilheiros)} artilheiros)"
     )
-    print("Top 5 (2014–2025): " + ", ".join(f"{nome} ({qtd})" for nome, qtd in top5))
+    print(
+        f"Top 5 ({min(meta['temporadas_com_gols'])}–{max(meta['temporadas_com_gols'])}): "
+        + ", ".join(f"{nome} ({qtd})" for nome, qtd in top5)
+    )
     print(f"Estatísticas:      {com_stats} jogos com dados técnicos detalhados")
+    if stats_merge is not None:
+        if stats_merge.get("arquivo_api_existe"):
+            print(
+                f"Merge API (BSA):   {stats_merge['lidos_da_api']} lido(s) | "
+                f"+{stats_merge['novos_da_api']} novo(s) na base | "
+                f"{stats_merge['duplicatas_ignoradas']} duplicata(s) ignorada(s)"
+            )
+        else:
+            print(f"Merge API (BSA):   '{API_INCREMENTAL_PATH.name}' ausente (execução offline)")
     print(f"Arquivo gerado:    {OUTPUT_PATH} ({tamanho_kb:.1f} KB)")
     print("=" * 64)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="ETL histórico do Dados Tricolor (2003–2025)."
+        description="ETL histórico e merge incremental do Dados Tricolor."
     )
     parser.add_argument(
         "--patch-json",
@@ -723,17 +1059,28 @@ def main() -> None:
         help=(
             "Aplica CORRECOES_DATAS_POR_ID e reordenação cronológica diretamente sobre "
             "data/historico_2003_2025.json e sincroniza docs/data/spfc_pontos_corridos.json "
-            "sem precisar dos CSVs brutos em data/raw/."
+            "com eventuais jogos incrementais da API, sem precisar dos CSVs brutos em data/raw/."
         ),
     )
     args = parser.parse_args()
 
     if args.patch_json:
-        payload = aplicar_patch_datas_base_existente()
-    else:
+        payload, stats_merge = aplicar_patch_datas_base_existente()
+    elif csvs_kaggle_disponiveis():
         historico_payload = montar_dataset()
-        payload = sincronizar_producao_com_historico(historico_payload)
-    exibir_resumo(payload)
+        payload, stats_merge = sincronizar_producao_com_historico(historico_payload)
+    elif HISTORICO_PATH.exists():
+        print(
+            "[INFO] CSVs brutos em data/raw/ ou pacote pandas indisponíveis; "
+            "utilizando base histórica congelada data/historico_2003_2025.json para sincronização e merge."
+        )
+        payload, stats_merge = aplicar_patch_datas_base_existente()
+    else:
+        validar_arquivos_entrada()
+        historico_payload = montar_dataset()
+        payload, stats_merge = sincronizar_producao_com_historico(historico_payload)
+
+    exibir_resumo(payload, stats_merge=stats_merge)
 
 
 if __name__ == "__main__":

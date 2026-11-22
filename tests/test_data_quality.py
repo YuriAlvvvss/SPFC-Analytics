@@ -29,6 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PROD_DATA_PATH = REPO_ROOT / "docs" / "data" / "spfc_pontos_corridos.json"
 HIST_DATA_PATH = REPO_ROOT / "data" / "historico_2003_2025.json"
 META_DATA_PATH = REPO_ROOT / "docs" / "data" / "meta.json"
+PROXIMO_JOGO_PATH = REPO_ROOT / "docs" / "data" / "proximo_jogo.json"
 
 ALL_JSON_PATHS = (PROD_DATA_PATH, HIST_DATA_PATH, META_DATA_PATH)
 DATASET_PATHS = (PROD_DATA_PATH, HIST_DATA_PATH)
@@ -37,6 +38,21 @@ DATASET_PATHS = (PROD_DATA_PATH, HIST_DATA_PATH)
 DATA_FUNDACAO_SPFC = date(1930, 1, 25)
 INICIO_PONTOS_CORRIDOS = date(2003, 1, 1)
 ANO_INICIO_ERA_MODERNA = 2014
+ANO_FIM_HISTORICO_KAGGLE = 2025
+
+PROXIMO_JOGO_ROOT_KEYS = {"atualizado_em", "tem_proximo_jogo", "proximo_jogo"}
+PROXIMO_JOGO_ITEM_KEYS = {
+    "data",
+    "hora",
+    "horario_definido",
+    "adversario",
+    "mando",
+    "rodada",
+    "temporada",
+    "competicao",
+    "status",
+}
+PROXIMO_JOGO_STATUS_VALIDOS = {"TIMED", "SCHEDULED"}
 
 # Número oficial de rodadas por edição dos pontos corridos
 RODADAS_POR_TEMPORADA: dict[int, int] = {
@@ -412,7 +428,13 @@ def test_schema_meta_sincronizacao(meta_sincronizacao: dict[str, Any]) -> None:
 
 
 def test_cobertura_era_moderna_cartoes_e_gols(dataset_partidas: tuple[str, dict[str, Any]]) -> None:
-    """Garante que partidas da era moderna (2014+) tenham gols e os 4 campos de cartões preenchidos."""
+    """
+    Garante que:
+    - Nenhuma partida possua cartões parcialmente preenchidos.
+    - Partidas da era moderna histórica (2014–2025) tenham gols e os 4 campos de cartões preenchidos.
+    - Partidas pós-histórico (2026+) vindas de APIs sem eventos detalhados (ex.: football-data.org)
+      possam manter gols/cartões como None, mas se preenchidos respeitem o tipo esperado.
+    """
     nome, payload = dataset_partidas
     erros: list[str] = []
 
@@ -427,15 +449,21 @@ def test_cobertura_era_moderna_cartoes_e_gols(dataset_partidas: tuple[str, dict[
                 f"{ {c: p.get(c) for c in CAMPOS_CARTOES} }"
             )
 
-        if p["temporada"] >= ANO_INICIO_ERA_MODERNA:
+        if ANO_INICIO_ERA_MODERNA <= p["temporada"] <= ANO_FIM_HISTORICO_KAGGLE:
             if not all(preenchidos):
                 erros.append(
-                    f"{_fmt_partida(idx, p)} partida >= {ANO_INICIO_ERA_MODERNA} sem cartões completos: "
-                    f"{ {c: p.get(c) for c in CAMPOS_CARTOES} }"
+                    f"{_fmt_partida(idx, p)} partida {ANO_INICIO_ERA_MODERNA}–{ANO_FIM_HISTORICO_KAGGLE} "
+                    f"sem cartões completos: { {c: p.get(c) for c in CAMPOS_CARTOES} }"
                 )
             if not isinstance(p.get("gols"), list):
                 erros.append(
-                    f"{_fmt_partida(idx, p)} partida >= {ANO_INICIO_ERA_MODERNA} sem lista de gols "
+                    f"{_fmt_partida(idx, p)} partida {ANO_INICIO_ERA_MODERNA}–{ANO_FIM_HISTORICO_KAGGLE} "
+                    f"sem lista de gols (valor={p.get('gols')!r})"
+                )
+        elif p["temporada"] > ANO_FIM_HISTORICO_KAGGLE:
+            if p.get("gols") is not None and not isinstance(p.get("gols"), list):
+                erros.append(
+                    f"{_fmt_partida(idx, p)} campo 'gols' deve ser list ou None "
                     f"(valor={p.get('gols')!r})"
                 )
 
@@ -931,3 +959,494 @@ def test_consistencia_entre_historico_producao_e_meta(
     assert meta_sincronizacao["ultima_partida_data"] == ultima_data, (
         f"[meta.json] ultima_partida_data={meta_sincronizacao['ultima_partida_data']!r} != {ultima_data!r}"
     )
+
+
+# ===========================================================================
+# 5. Testes offline da ingestão incremental (football-data.org) e Próximo Jogo
+# ===========================================================================
+
+
+def _importar_modulos_etl() -> tuple[Any, Any]:
+    import sys
+
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    from etl import atualizar_jogos_api, processar_dados
+
+    return atualizar_jogos_api, processar_dados
+
+
+def _validar_schema_proximo_jogo(payload: dict[str, Any]) -> None:
+    """Valida todas as invariantes de schema e domínio de `proximo_jogo.json`."""
+    assert isinstance(payload, dict), "Raiz de proximo_jogo.json deve ser objeto JSON."
+    assert set(payload.keys()) == PROXIMO_JOGO_ROOT_KEYS, (
+        f"Chaves raiz divergentes em proximo_jogo.json: {sorted(payload.keys())}"
+    )
+
+    motivo_at = _texto_invalido(payload["atualizado_em"])
+    assert motivo_at is None, f"Campo 'atualizado_em' inválido: {motivo_at}"
+    dt_at = datetime.fromisoformat(payload["atualizado_em"])
+    assert dt_at.tzinfo is not None, "'atualizado_em' deve incluir fuso horário (ex.: -03:00)."
+
+    tem_proximo = payload["tem_proximo_jogo"]
+    proximo = payload["proximo_jogo"]
+    assert isinstance(tem_proximo, bool), "'tem_proximo_jogo' deve ser bool."
+
+    if not tem_proximo:
+        assert proximo is None, "Quando tem_proximo_jogo=False, proximo_jogo deve ser None."
+        return
+
+    assert isinstance(proximo, dict), "Quando tem_proximo_jogo=True, proximo_jogo deve ser dict."
+    assert set(proximo.keys()) == PROXIMO_JOGO_ITEM_KEYS, (
+        f"Chaves de proximo_jogo divergentes: {sorted(proximo.keys())}"
+    )
+
+    assert isinstance(proximo["data"], str) and RE_DATA_ISO.fullmatch(proximo["data"]), (
+        f"data fora do padrão YYYY-MM-DD: {proximo['data']!r}"
+    )
+    date.fromisoformat(proximo["data"])
+
+    horario_definido = proximo["horario_definido"]
+    hora = proximo["hora"]
+    assert isinstance(horario_definido, bool), "'horario_definido' deve ser bool."
+    if horario_definido:
+        assert isinstance(hora, str) and RE_HORA.fullmatch(hora), (
+            f"hora inválida com horario_definido=True: {hora!r}"
+        )
+        hh, mm = map(int, hora.split(":"))
+        assert 0 <= hh <= 23 and 0 <= mm <= 59, f"hora fora de 00:00..23:59: {hora!r}"
+    else:
+        assert hora is None, f"Quando horario_definido=False, hora deve ser None (obtido {hora!r})."
+
+    motivo_adv = _texto_invalido(proximo["adversario"])
+    assert motivo_adv is None, f"adversario inválido: {motivo_adv}"
+    assert _normalizar_chave_texto(proximo["adversario"]) != "sao paulo", (
+        "São Paulo não pode constar como próprio adversário em proximo_jogo.json."
+    )
+
+    assert proximo["mando"] in MANDOS_VALIDOS, f"mando inválido: {proximo['mando']!r}"
+    assert proximo["status"] in PROXIMO_JOGO_STATUS_VALIDOS, (
+        f"status fora de {sorted(PROXIMO_JOGO_STATUS_VALIDOS)}: {proximo['status']!r}"
+    )
+    assert proximo["competicao"] == "Brasileirão Série A", (
+        f"competicao inesperada: {proximo['competicao']!r}"
+    )
+    assert _eh_inteiro(proximo["temporada"]) and proximo["temporada"] >= 2003, (
+        f"temporada inválida: {proximo['temporada']!r}"
+    )
+    if proximo["rodada"] is not None:
+        max_rod = _max_rodadas_temporada(proximo["temporada"])
+        assert _eh_inteiro(proximo["rodada"]) and 1 <= proximo["rodada"] <= max_rod, (
+            f"rodada fora de 1..{max_rod}: {proximo['rodada']!r}"
+        )
+
+
+def test_api_conversao_fuso_utc_para_brasilia() -> None:
+    """
+    Valida offline a conversão UTC -> America/Sao_Paulo:
+    - Jogo noturno 00:30:00Z vira 21:30 do dia anterior em Brasília.
+    - Jogo TIMED 00:00:00Z (21h BRT confirmado) vira 21:00 do dia anterior.
+    - Jogo SCHEDULED 00:00:00Z (horário não definido pela CBF) preserva a data
+      sem recuar um dia e marca hora=None / horario_definido=False.
+    - Jogo vespertino 19:00:00Z vira 16:00 do mesmo dia.
+    """
+    api_mod, _ = _importar_modulos_etl()
+
+    # 21h30 BRT no dia 15/08 vem como 00:30:00Z do dia 16/08 em UTC
+    data_fin, hora_fin, def_fin = api_mod.converter_data_hora_api(
+        "2026-08-16T00:30:00Z", "FINISHED"
+    )
+    assert (data_fin, hora_fin, def_fin) == ("2026-08-15", "21:30", True)
+
+    # TIMED às 00:30:00Z também deve recuar para 21:30 do dia anterior
+    data_t1, hora_t1, def_t1 = api_mod.converter_data_hora_api(
+        "2026-11-26T00:30:00Z", "TIMED"
+    )
+    assert (data_t1, hora_t1, def_t1) == ("2026-11-25", "21:30", True)
+
+    # TIMED às 00:00:00Z é jogo confirmado às 21:00 BRT do dia anterior
+    data_t2, hora_t2, def_t2 = api_mod.converter_data_hora_api(
+        "2026-11-26T00:00:00Z", "TIMED"
+    )
+    assert (data_t2, hora_t2, def_t2) == ("2026-11-25", "21:00", True)
+
+    # SCHEDULED com 00:00:00Z (horário a definir pela CBF): NÃO recua para o dia anterior!
+    data_sch, hora_sch, def_sch = api_mod.converter_data_hora_api(
+        "2026-12-06T00:00:00Z", "SCHEDULED"
+    )
+    assert (data_sch, hora_sch, def_sch) == ("2026-12-06", None, False)
+
+    # Jogo vespertino no mesmo dia
+    data_vesp, hora_vesp, def_vesp = api_mod.converter_data_hora_api(
+        "2026-11-22T19:00:00Z", "TIMED"
+    )
+    assert (data_vesp, hora_vesp, def_vesp) == ("2026-11-22", "16:00", True)
+
+
+def test_api_normalizacao_clubes_e_separacao_status(
+    dataset_producao: dict[str, Any],
+) -> None:
+    """
+    Valida offline:
+    - O de-para MAPA_TIMES_API mapeia nomes oficiais da football-data.org para
+      exatamente os nomes usados na base histórica (sem criar duplicatas).
+    - Partidas IN_PLAY/PAUSED/POSTPONED/SUSPENDED/CANCELLED são ignoradas.
+    - A seleção do próximo jogo escolhe a partida futura mais próxima e trata fim de campeonato.
+    """
+    api_mod, _ = _importar_modulos_etl()
+    adversarios_base = {p["adversario"] for p in dataset_producao["partidas"]}
+
+    casos_de_para = [
+        ({"name": "CA Mineiro", "shortName": "Mineiro"}, "Atlético-MG"),
+        ({"name": "CA Paranaense", "shortName": "Paranaense"}, "Athletico-PR"),
+        ({"name": "CR Flamengo", "shortName": "Flamengo"}, "Flamengo"),
+        ({"name": "SE Palmeiras", "shortName": "Palmeiras"}, "Palmeiras"),
+        ({"name": "SC Corinthians Paulista", "shortName": "Corinthians"}, "Corinthians"),
+        ({"name": "CR Vasco da Gama", "shortName": "Vasco da Gama"}, "Vasco"),
+        ({"name": "RB Bragantino", "shortName": "Bragantino"}, "Bragantino"),
+        ({"name": "Botafogo FR", "shortName": "Botafogo"}, "Botafogo"),
+        ({"name": "EC Vitória", "shortName": "Vitória"}, "Vitória"),
+        ({"name": "Clube do Remo", "shortName": "Remo"}, "Remo"),
+        ({"name": "Mirassol FC", "shortName": "Mirassol"}, "Mirassol"),
+        ({"name": "Chapecoense AF", "shortName": "Chapecoense"}, "Chapecoense"),
+    ]
+    for team_obj, esperado in casos_de_para:
+        normalizado, mapeado = api_mod.normalizar_clube_api(team_obj)
+        assert mapeado is True and normalizado == esperado
+        assert esperado in adversarios_base, f"'{esperado}' deveria existir na base do projeto."
+
+    spfc_team = {"id": 1776, "name": "São Paulo FC", "shortName": "São Paulo"}
+    adv_bota = {"id": 1770, "name": "Botafogo FR", "shortName": "Botafogo"}
+    adv_remo = {"id": 9991, "name": "Clube do Remo", "shortName": "Remo"}
+
+    # Status em andamento/adiados não entram como partida encerrada nem como próximo jogo
+    for status_ignorado in ("IN_PLAY", "PAUSED", "POSTPONED", "SUSPENDED", "CANCELLED"):
+        match_ign = {
+            "id": 700001,
+            "utcDate": "2026-11-25T21:30:00Z",
+            "status": status_ignorado,
+            "matchday": 36,
+            "season": {"startDate": "2026-01-28"},
+            "homeTeam": adv_bota,
+            "awayTeam": spfc_team,
+            "score": {"fullTime": {"home": 1, "away": 1}},
+        }
+        assert api_mod.extrair_partida_encerrada_api(match_ign) is None
+
+    # Seleção do próximo jogo futuro mais próximo
+    ref_brt = datetime(2026, 11, 22, 14, 0, tzinfo=api_mod.BRT)
+    matches_mock = [
+        {
+            "id": 700010,
+            "utcDate": "2026-11-20T00:30:00Z",
+            "status": "FINISHED",
+            "matchday": 35,
+            "season": {"startDate": "2026-01-28"},
+            "homeTeam": spfc_team,
+            "awayTeam": {"id": 1765, "name": "Fluminense FC", "shortName": "Fluminense"},
+            "score": {"fullTime": {"home": 0, "away": 1}},
+        },
+        {
+            "id": 700012,
+            "utcDate": "2026-12-02T00:00:00Z",
+            "status": "SCHEDULED",
+            "matchday": 37,
+            "season": {"startDate": "2026-01-28"},
+            "homeTeam": spfc_team,
+            "awayTeam": adv_remo,
+            "score": {"fullTime": {"home": None, "away": None}},
+        },
+        {
+            "id": 700011,
+            "utcDate": "2026-11-26T00:30:00Z",
+            "status": "TIMED",
+            "matchday": 36,
+            "season": {"startDate": "2026-01-28"},
+            "homeTeam": adv_bota,
+            "awayTeam": spfc_team,
+            "score": {"fullTime": {"home": None, "away": None}},
+        },
+    ]
+
+    proximo = api_mod.selecionar_proximo_jogo(matches_mock, agora_brt=ref_brt)
+    assert proximo is not None
+    assert proximo["rodada"] == 36
+    assert proximo["data"] == "2026-11-25"
+    assert proximo["hora"] == "21:30"
+    assert proximo["horario_definido"] is True
+    assert proximo["adversario"] == "Botafogo"
+    assert proximo["mando"] == "Fora"
+    assert proximo["status"] == "TIMED"
+
+    payload_com_jogo = api_mod.montar_payload_proximo_jogo(proximo, agora_brt=ref_brt)
+    _validar_schema_proximo_jogo(payload_com_jogo)
+
+    # Caso SCHEDULED com 00:00:00Z (somente R37 futura)
+    proximo_sch = api_mod.selecionar_proximo_jogo([matches_mock[1]], agora_brt=ref_brt)
+    assert proximo_sch is not None
+    assert proximo_sch["data"] == "2026-12-02"
+    assert proximo_sch["hora"] is None
+    assert proximo_sch["horario_definido"] is False
+    _validar_schema_proximo_jogo(
+        api_mod.montar_payload_proximo_jogo(proximo_sch, agora_brt=ref_brt)
+    )
+
+    # Fim de campeonato (apenas jogos encerrados) -> tem_proximo_jogo=False
+    proximo_vazio = api_mod.selecionar_proximo_jogo([matches_mock[0]], agora_brt=ref_brt)
+    assert proximo_vazio is None
+    payload_sem_jogo = api_mod.montar_payload_proximo_jogo(proximo_vazio, agora_brt=ref_brt)
+    assert payload_sem_jogo["tem_proximo_jogo"] is False
+    assert payload_sem_jogo["proximo_jogo"] is None
+    _validar_schema_proximo_jogo(payload_sem_jogo)
+
+
+def test_merge_idempotente_e_deduplicacao_api(
+    dataset_historico: dict[str, Any],
+) -> None:
+    """
+    Valida offline a idempotência e a deduplicação determinística do merge:
+    1. `mesclar_incremental_api` rodando duas vezes com os mesmos jogos não duplica
+       registros e preserva temporadas anteriores.
+    2. `mesclar_partidas_deterministico` em `etl/processar_dados.py`:
+       - Deduplica sobreposição com a base histórica Kaggle (2025 R38) preservando o histórico.
+       - Insere novos jogos da API preenchendo todas as 29 chaves (inclusive `arena` padrão).
+       - Rodar o merge duas vezes seguidas produz exatamente o mesmo resultado (0 duplicatas).
+    """
+    api_mod, etl_mod = _importar_modulos_etl()
+
+    hist_sample = dataset_historico["partidas"][-3:]  # últimas 3 partidas de 2025 (inclui R38)
+    ultima_hist = hist_sample[-1]
+
+    # Simula 1 jogo sobreposto ao Kaggle (mesma temporada/rodada) + 2 jogos novos em 2026
+    jogo_sobreposto_2025 = {
+        "id": 555001,
+        "temporada": ultima_hist["temporada"],
+        "rodada": ultima_hist["rodada"],
+        "data": ultima_hist["data"],
+        "hora": "16:00",
+        "mando": ultima_hist["mando"],
+        "adversario": ultima_hist["adversario"],
+        "adversario_estado": ultima_hist["adversario_estado"],
+        "arena": None,
+        "gols_pro": ultima_hist["gols_pro"],
+        "gols_contra": ultima_hist["gols_contra"],
+    }
+    jogo_novo_fora = {
+        "id": 555036,
+        "temporada": 2026,
+        "rodada": 36,
+        "data": "2026-11-25",
+        "hora": "21:30",
+        "mando": "Fora",
+        "adversario": "Botafogo",
+        "adversario_estado": None,
+        "arena": None,
+        "gols_pro": 2,
+        "gols_contra": 1,
+    }
+    jogo_novo_casa = {
+        "id": 555037,
+        "temporada": 2026,
+        "rodada": 37,
+        "data": "2026-12-02",
+        "hora": "20:00",
+        "mando": "Casa",
+        "adversario": "Remo",
+        "adversario_estado": None,
+        "arena": None,
+        "gols_pro": 3,
+        "gols_contra": 0,
+    }
+    lote_api = [jogo_sobreposto_2025, jogo_novo_fora, jogo_novo_casa]
+
+    # 1. Idempotência no arquivo incremental da API
+    inc_1, novos_1, atual_1 = api_mod.mesclar_incremental_api([], lote_api)
+    assert len(inc_1) == 3 and novos_1 == 3 and atual_1 == 0
+
+    inc_2, novos_2, atual_2 = api_mod.mesclar_incremental_api(inc_1, lote_api)
+    assert inc_2 == inc_1
+    assert novos_2 == 0 and atual_2 == 0
+
+    # 2. Primeira execução do merge no processar_dados.py
+    merged_1, stats_1 = etl_mod.mesclar_partidas_deterministico(
+        partidas_historicas=hist_sample,
+        partidas_api=lote_api,
+    )
+    assert len(merged_1) == len(hist_sample) + 2
+    assert stats_1["novos_da_api"] == 2
+    assert stats_1["duplicatas_ignoradas"] == 1
+
+    # Histórico 2025 intacto (não foi sobrescrito pelo registro da API)
+    assert merged_1[: len(hist_sample)] == hist_sample
+
+    # Novos registros possuem todas as 29 chaves, arena preenchida e derivados coerentes
+    for novo in merged_1[len(hist_sample) :]:
+        assert set(novo.keys()) == PARTIDA_ALL_FIELDS
+        assert novo["arena"] and _texto_invalido(novo["arena"]) is None
+        assert novo["adversario_estado"] in UFS_BRASIL
+        assert novo["saldo_gols"] == novo["gols_pro"] - novo["gols_contra"]
+    assert merged_1[-2]["arena"] == "Estádio Nilton Santos, Rio de Janeiro"
+    assert merged_1[-1]["arena"] == "MorumBIS, São Paulo"
+    assert merged_1[-1]["resultado"] == "V" and merged_1[-1]["pontos"] == 3
+
+    # 3. Segunda execução do merge (repassando os pós-histórico + mesmo lote da API) -> 100% idempotente
+    posteriores_1 = [p for p in merged_1 if p["temporada"] > 2025]
+    merged_2, stats_2 = etl_mod.mesclar_partidas_deterministico(
+        partidas_historicas=hist_sample,
+        partidas_api=lote_api,
+        partidas_posteriores_existentes=posteriores_1,
+    )
+    assert merged_2 == merged_1
+    assert stats_2["novos_da_api"] == 0
+    assert stats_2["duplicatas_ignoradas"] == len(lote_api)
+
+    # 4. Mesmo passando o lote da API duplicado na mesma chamada, não duplica nada
+    merged_dup, stats_dup = etl_mod.mesclar_partidas_deterministico(
+        partidas_historicas=hist_sample,
+        partidas_api=lote_api + lote_api,
+    )
+    assert merged_dup == merged_1
+    assert stats_dup["novos_da_api"] == 2
+    assert len({p["id"] for p in merged_dup}) == len(merged_dup)
+
+
+def test_schema_proximo_jogo_quando_presente() -> None:
+    """
+    Valida o contrato de schema de `proximo_jogo.json` (via escrita/leitura JSON
+    estrita offline) e, quando `docs/data/proximo_jogo.json` existir na pasta de
+    produção, valida integralmente o arquivo real.
+    """
+    import tempfile
+
+    api_mod, _ = _importar_modulos_etl()
+
+    # Sempre exercita serialização atômica + leitura estrita + validação de schema offline
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        amostra_path = Path(tmp_dir) / "proximo_jogo.json"
+        amostra_payload = api_mod.montar_payload_proximo_jogo(
+            {
+                "data": "2026-11-25",
+                "hora": "21:30",
+                "horario_definido": True,
+                "adversario": "Botafogo",
+                "mando": "Fora",
+                "rodada": 36,
+                "temporada": 2026,
+                "competicao": "Brasileirão Série A",
+                "status": "TIMED",
+            },
+            agora_brt=datetime(2026, 11, 22, 14, 0, tzinfo=api_mod.BRT),
+        )
+        api_mod.salvar_json_atomico(amostra_payload, amostra_path)
+        _validar_schema_proximo_jogo(_carregar_json_estrito(amostra_path))
+
+    # Se o arquivo real existir em docs/data/, valida rigorosamente o arquivo de produção
+    if PROXIMO_JOGO_PATH.exists():
+        raw = PROXIMO_JOGO_PATH.read_bytes()
+        assert len(raw) > 0, "docs/data/proximo_jogo.json está vazio."
+        assert not raw.startswith(b"\xef\xbb\xbf"), "docs/data/proximo_jogo.json contém BOM UTF-8."
+        assert "\ufffd" not in raw.decode("utf-8"), "docs/data/proximo_jogo.json contém U+FFFD."
+
+        payload_real = _carregar_json_estrito(PROXIMO_JOGO_PATH)
+        _validar_schema_proximo_jogo(payload_real)
+
+
+def test_sincronizacao_etl_offline_e_com_api_incremental(
+    dataset_historico: dict[str, Any],
+) -> None:
+    """
+    Valida ponta a ponta (em diretório temporário) que `sincronizar_producao_com_historico`:
+    - Funciona normalmente offline quando `jogos_api_brasileirao.json` não existe.
+    - Quando `jogos_api_brasileirao.json` existe, faz merge determinístico sem duplicatas
+      e atualiza `meta.json` com contadores consistentes.
+    - É idempotente em execuções repetidas.
+    """
+    import tempfile
+
+    api_mod, etl_mod = _importar_modulos_etl()
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp = Path(tmp_dir)
+        hist_dst = tmp / "historico_2003_2025.json"
+        prod_dst = tmp / "spfc_pontos_corridos.json"
+        meta_dst = tmp / "meta.json"
+        api_src = tmp / "jogos_api_brasileirao.json"
+
+        # 1. Execução offline (sem arquivo da API)
+        payload_off, stats_off = etl_mod.sincronizar_producao_com_historico(
+            dataset_historico,
+            destino_historico=hist_dst,
+            destino_producao=prod_dst,
+            caminho_api=api_src,
+            destino_meta=meta_dst,
+        )
+        assert stats_off["arquivo_api_existe"] is False
+        assert len(payload_off["partidas"]) == len(dataset_historico["partidas"])
+        meta_off = _carregar_json_estrito(meta_dst)
+        assert meta_off["total_jogos"] == len(dataset_historico["partidas"])
+
+        # 2. Cria arquivo incremental da API com 1 jogo sobreposto (2025 R38) + 1 novo (2026 R1)
+        ultima_hist = dataset_historico["partidas"][-1]
+        api_mod.salvar_json_atomico(
+            {
+                "metadata": {"fonte": "football-data.org (v4 / BSA)", "total_partidas": 2},
+                "partidas": [
+                    {
+                        "id": 600001,
+                        "temporada": ultima_hist["temporada"],
+                        "rodada": ultima_hist["rodada"],
+                        "data": ultima_hist["data"],
+                        "hora": "16:00",
+                        "mando": ultima_hist["mando"],
+                        "adversario": ultima_hist["adversario"],
+                        "adversario_estado": ultima_hist["adversario_estado"],
+                        "arena": None,
+                        "gols_pro": ultima_hist["gols_pro"],
+                        "gols_contra": ultima_hist["gols_contra"],
+                    },
+                    {
+                        "id": 600002,
+                        "temporada": 2026,
+                        "rodada": 1,
+                        "data": "2026-01-28",
+                        "hora": "21:30",
+                        "mando": "Casa",
+                        "adversario": "Flamengo",
+                        "adversario_estado": "RJ",
+                        "arena": None,
+                        "gols_pro": 2,
+                        "gols_contra": 1,
+                    },
+                ],
+            },
+            api_src,
+        )
+
+        payload_1, stats_1 = etl_mod.sincronizar_producao_com_historico(
+            dataset_historico,
+            destino_historico=hist_dst,
+            destino_producao=prod_dst,
+            caminho_api=api_src,
+            destino_meta=meta_dst,
+        )
+        assert stats_1["arquivo_api_existe"] is True
+        assert stats_1["novos_da_api"] == 1
+        assert stats_1["duplicatas_ignoradas"] == 1
+        assert len(payload_1["partidas"]) == len(dataset_historico["partidas"]) + 1
+        meta_1 = _carregar_json_estrito(meta_dst)
+        assert meta_1["total_jogos"] == len(payload_1["partidas"])
+        assert meta_1["jogos_temporada_atual"] == 1
+        assert meta_1["jogos_historico"] == len(dataset_historico["partidas"])
+        assert meta_1["ultima_partida_data"] == "2026-01-28"
+
+        # 3. Segunda execução (idempotente)
+        payload_2, stats_2 = etl_mod.sincronizar_producao_com_historico(
+            dataset_historico,
+            destino_historico=hist_dst,
+            destino_producao=prod_dst,
+            caminho_api=api_src,
+            destino_meta=meta_dst,
+        )
+        assert stats_2["novos_da_api"] == 0
+        assert stats_2["duplicatas_ignoradas"] == 2
+        assert payload_2["partidas"] == payload_1["partidas"]
