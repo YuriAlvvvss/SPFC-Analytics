@@ -7,8 +7,8 @@
 **Acesso em produção:** [dadostricolor.live](https://dadostricolor.live/)
 
 [![Qualidade de Dados (Data Quality)](https://github.com/YuriAlvvvss/SPFC-Analytics/actions/workflows/data-quality.yml/badge.svg)](https://github.com/YuriAlvvvss/SPFC-Analytics/actions/workflows/data-quality.yml)
-[![Atualizar Dados do Brasileirão (API + Deploy)](https://github.com/YuriAlvvvss/SPFC-Analytics/actions/workflows/atualizar-dados.yml/badge.svg)](https://github.com/YuriAlvvvss/SPFC-Analytics/actions/workflows/atualizar-dados.yml)
-[![Atualizar Jogos SPFC (ESPN)](https://github.com/YuriAlvvvss/SPFC-Analytics/actions/workflows/atualizar-jogos.yml/badge.svg)](https://github.com/YuriAlvvvss/SPFC-Analytics/actions/workflows/atualizar-jogos.yml)
+[![Atualizar Dados do Brasileirão (API + ESPN + Deploy)](https://github.com/YuriAlvvvss/SPFC-Analytics/actions/workflows/atualizar-dados.yml/badge.svg)](https://github.com/YuriAlvvvss/SPFC-Analytics/actions/workflows/atualizar-dados.yml)
+[![Atualizar Jogos SPFC (ESPN — Manual)](https://github.com/YuriAlvvvss/SPFC-Analytics/actions/workflows/atualizar-jogos.yml/badge.svg)](https://github.com/YuriAlvvvss/SPFC-Analytics/actions/workflows/atualizar-jogos.yml)
 
 [![GitHub Pages](https://img.shields.io/badge/Deploy-GitHub%20Pages-111315?style=for-the-badge&logo=github)](https://dadostricolor.live/)
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
@@ -30,7 +30,7 @@ O **Dados Tricolor** é uma aplicação web **100% estática** — construída e
 
 O projeto opera com uma **arquitetura híbrida e um pipeline 100% autônomo protegido por testes automatizados**:
 - **Base histórica congelada (2003–2025):** estruturada em **Python + Pandas** a partir dos CSVs públicos do Campeonato Brasileiro (Kaggle) e versionada em `data/historico_2003_2025.json`.
-- **Pipeline autônomo diário via API (2026+):** executado automaticamente todos os dias às **03h00 BRT** no **GitHub Actions** ([`atualizar-dados.yml`](.github/workflows/atualizar-dados.yml)), consulta a API **`football-data.org` (v4 / `BSA`)** via `etl/atualizar_jogos_api.py`, grava jogos encerrados em `data/jogos_api_brasileirao.json` e a agenda do próximo confronto em `docs/data/proximo_jogo.json`, realiza o merge determinístico em `etl/processar_dados.py` e atualiza `docs/data/spfc_pontos_corridos.json` e `docs/data/meta.json` — com sincronização complementar via API pública da ESPN (`etl/atualizar_temporada.py`) para enriquecimento de eventos da temporada atual.
+- **Pipeline autônomo diário unificado (2026+):** executado automaticamente todos os dias às **03h00 e 12h00 BRT** no **GitHub Actions** ([`atualizar-dados.yml`](.github/workflows/atualizar-dados.yml)), consulta a API **`football-data.org` (v4 / `BSA`)** via `etl/atualizar_jogos_api.py` (jogos encerrados em `data/jogos_api_brasileirao.json` e próximo confronto em `docs/data/proximo_jogo.json`), enriquece imediatamente a temporada atual com gols, cartões/expulsões, formação e estatísticas via API pública da **ESPN (`bra.1`)** em `etl/atualizar_temporada.py` (com tolerância a falhas transitórias), realiza o merge determinístico em `etl/processar_dados.py` e atualiza `docs/data/spfc_pontos_corridos.json` e `docs/data/meta.json` em um único commit e deploy.
 - **Quality Gate contínuo:** toda atualização automatizada ou push/PR na `main` passa pela suíte `pytest` em `tests/test_data_quality.py` antes de qualquer commit automático ou deploy no GitHub Pages.
 
 ---
@@ -46,7 +46,7 @@ O projeto opera com uma **arquitetura híbrida e um pipeline 100% autônomo prot
 | **Gols detalhados** | **570 gols** (`563` de 117 atletas + `7` gols contra a favor) | 2014–2025 (456 jogos) |
 | **Estatísticas técnicas** | Chutes, posse de bola, passes, faltas e escanteios | 379 jogos |
 
-> **Temporada atual (`2026+`):** os jogos finalizados e o calendário do próximo confronto são atualizados automaticamente todos os dias às 03h00 BRT pelo pipeline autônomo do GitHub Actions (`football-data.org`), complementado pela sincronização da ESPN às segundas e sextas-feiras às 08h00 BRT (ambos também com disparo manual). Os totais atualizados e a data/hora da última sincronização em horário de Brasília são exibidos diretamente no painel via `docs/data/meta.json`.
+> **Temporada atual (`2026+`):** os jogos finalizados, detalhes completos (artilheiros, cartões/expulsões e estatísticas técnicas via ESPN) e o calendário do próximo confronto (`football-data.org`) são atualizados automaticamente todos os dias às **03h00 e 12h00 BRT** pelo pipeline autônomo unificado no GitHub Actions (também com disparo manual, além de um workflow manual dedicado da ESPN com opção `--force-refresh`). Os totais atualizados e a data/hora da última sincronização em horário de Brasília são exibidos diretamente no painel via `docs/data/meta.json`.
 
 ---
 
@@ -124,8 +124,10 @@ O projeto conta com um fluxo de dados **ponta a ponta e 100% autônomo** — da 
 flowchart LR
     API["football-data.org (API v4 / BSA)"] --> ING["Ingestão Incremental + De-para\n(etl/atualizar_jogos_api.py)"]
     ING --> INC["data/jogos_api_brasileirao.json\n+ docs/data/proximo_jogo.json"]
+    ESPN["ESPN API (bra.1)"] --> ENR["Enriquecimento (gols, cartões, stats)\n(etl/atualizar_temporada.py)"]
     KAG["Base Histórica Kaggle\n(data/raw/*.csv -> data/historico_2003_2025.json)"] --> ETL["Merge ETL Determinístico\n(etl/processar_dados.py)"]
     INC --> ETL
+    ENR --> ETL
     ETL --> PROD["docs/data/spfc_pontos_corridos.json\n+ docs/data/meta.json"]
     PROD --> QG["Quality Gate (pytest -v)\n(tests/test_data_quality.py)"]
     QG --> CMT["Commit Condicional\n(git push main se houver diff real)"]
@@ -138,11 +140,11 @@ flowchart LR
 - **Idempotência Real (Zero Commits Fantasma):** tanto `etl/atualizar_jogos_api.py` (`incremental_alterado` e `proximo_jogo_alterado`) quanto `etl/processar_dados.py` (`_dataset_producao_alterado` e `sincronizar_meta_json`) comparam o conteúdo funcional ignorando apenas timestamps (`atualizado_em` / `gerado_em`) e utilizam gravação atômica (`.tmp` + `os.replace` com `allow_nan=False`). No GitHub Actions, o robô só commita, faz push e dispara `build` + `deploy` quando há mudança efetiva nos jogos encerrados ou na agenda do próximo jogo — evitando commits vazios diários.
 - **Separação de Workflows (CI/CD):**
   - **[`.github/workflows/data-quality.yml`](.github/workflows/data-quality.yml) (CI/CD para pushes manuais e Pull Requests):** acionado em `push` e `pull_request` na `main` (e `workflow_dispatch`), encadeando `data-quality` (`pytest -v`) → `build` (empacota `./docs`, apenas em `push` na `main`) → `deploy` (publica no ambiente `github-pages`, apenas em `push` na `main`).
-  - **[`.github/workflows/atualizar-dados.yml`](.github/workflows/atualizar-dados.yml) (Pipeline Autônomo Agendado + Deploy):** acionado diariamente via `cron: "0 6 * * *"` (**03h00 BRT**) e sob demanda via `workflow_dispatch`, em 3 jobs encadeados:
-    1. **`update-data`:** valida o Secret `FOOTBALL_DATA_API_KEY` (*fail-fast*), executa `python etl/atualizar_jogos_api.py`, roda `python etl/processar_dados.py`, aplica o Quality Gate (`pytest -v`), verifica alterações reais nos 4 JSONs de dados (`data/jogos_api_brasileirao.json`, `docs/data/spfc_pontos_corridos.json`, `docs/data/meta.json` e `docs/data/proximo_jogo.json`) e só executa commit, `git pull --rebase` e push para `main` quando `has_changes == 'true'`.
+  - **[`.github/workflows/atualizar-dados.yml`](.github/workflows/atualizar-dados.yml) (Pipeline Autônomo Agendado + ESPN + Deploy):** acionado diariamente às **03h00 e 12h00 BRT** via `cron: "0 6,15 * * *"` e sob demanda via `workflow_dispatch`, em 3 jobs encadeados:
+    1. **`update-data`:** valida o Secret `FOOTBALL_DATA_API_KEY` (*fail-fast*), executa `python etl/atualizar_jogos_api.py`, enriquece a temporada atual via `python etl/atualizar_temporada.py` (com tolerância a falhas transitórias da ESPN para nunca travar a atualização do placar/próximo jogo), roda `python etl/processar_dados.py`, aplica o Quality Gate (`pytest -v`), verifica alterações reais nos 4 JSONs de dados (`data/jogos_api_brasileirao.json`, `docs/data/spfc_pontos_corridos.json`, `docs/data/meta.json` e `docs/data/proximo_jogo.json`) e só executa commit, `git pull --rebase` e push para `main` quando `has_changes == 'true'`.
     2. **`build`** (`needs: update-data`, `if: has_changes == 'true'`): faz checkout da `main` atualizada e empacota `./docs` como artefato do GitHub Pages.
     3. **`deploy`** (`needs: build`): publica o artefato validado no ambiente `github-pages` (`dadostricolor.live`).
-  - **[`.github/workflows/atualizar-jogos.yml`](.github/workflows/atualizar-jogos.yml) (Sincronização Complementar — ESPN):** agendado às segundas e sextas-feiras às 08h00 BRT (`cron: "0 11 * * 1,5"`) e sob demanda; executa `etl/atualizar_temporada.py`, roda `pytest -v` e commita `docs/data/` apenas quando há alteração real.
+  - **[`.github/workflows/atualizar-jogos.yml`](.github/workflows/atualizar-jogos.yml) (Sincronização Manual — ESPN + Deploy):** mantido apenas sob demanda (`workflow_dispatch`, com opção `force_refresh`) para reprocessamento manual da ESPN sem depender da `football-data.org`; executa `etl/atualizar_temporada.py`, sincroniza via `etl/processar_dados.py`, valida com `pytest -v`, commita se houver alteração real e executa `build` + `deploy` no GitHub Pages.
 
 ### Componentes do ETL e Qualidade de Dados
 
@@ -184,8 +186,8 @@ Suíte automatizada em **`pytest`** (100% offline) que valida `docs/data/spfc_po
 SPFC-Analytics/
 ├── .github/
 │   └── workflows/
-│       ├── atualizar-dados.yml          # Pipeline autônomo diário (03h BRT): API -> ETL -> pytest -> deploy
-│       ├── atualizar-jogos.yml          # Sincronização complementar via API ESPN (Seg/Sex 08h BRT) + Quality Gate
+│       ├── atualizar-dados.yml          # Pipeline autônomo (03h e 12h BRT): API -> ESPN -> ETL -> pytest -> deploy
+│       ├── atualizar-jogos.yml          # Sincronização manual sob demanda via API ESPN (com force_refresh + deploy)
 │       └── data-quality.yml             # Pipeline CI/CD (push/PR na main): data-quality -> build -> deploy
 ├── data/
 │   ├── historico_2003_2025.json         # Base histórica congelada (versionada no Git)
@@ -276,7 +278,7 @@ Para que o workflow [`.github/workflows/atualizar-dados.yml`](.github/workflows/
 1. Acesse **Settings → Secrets and variables → Actions** no GitHub.
 2. Clique em **New repository secret**.
 3. Defina o nome exato **`FOOTBALL_DATA_API_KEY`** e cole a sua chave da [football-data.org](https://www.football-data.org/).
-4. O workflow validará o segredo em modo *fail-fast* antes de consultar a API, rodando diariamente às **03h00 BRT** ou manualmente em **Actions → Atualizar Dados do Brasileirão (API + Deploy) → Run workflow**.
+4. O workflow validará o segredo em modo *fail-fast* antes de consultar a API, rodando diariamente às **03h00 e 12h00 BRT** ou manualmente em **Actions → Atualizar Dados do Brasileirão (API + ESPN + Deploy) → Run workflow**.
 
 ### 4. Outras Rotinas de ETL (Opcionais)
 

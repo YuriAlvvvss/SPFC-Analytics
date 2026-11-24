@@ -1620,3 +1620,257 @@ def test_api_idempotencia_contra_commits_fantasma(
         assert res_6["proximo_jogo_gravado"] is False
         assert inc_path.read_bytes() == bytes_inc_t5
         assert prox_path.read_bytes() == bytes_prox_t5
+
+
+def test_integracao_hibrida_api_e_espn_sem_regressao(
+    dataset_historico: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Valida offline o ciclo completo do pipeline diário unificado (football-data.org + ESPN + merge):
+    1. Jogos encerrados entram primeiro pela football-data.org (sem gols/cartões/stats).
+    2. Quando a ESPN libera apenas parte desses jogos (atraso parcial), ela NÃO aborta por
+       falsa regressão, enriquece o jogo liberado e preserva o jogo básico ainda pendente.
+    3. Quando a ESPN libera o restante na execução seguinte, reutiliza o cache do já enriquecido,
+       enriquece o pendente e o merge em `processar_dados.py` deduplica sem sobrescrever os detalhes.
+    4. Nova execução sem novidades é 100% idempotente (zero reescrita em disco).
+    5. Resposta `/summary` incompleta (gols divergentes ou cartões parciais) é sanitizada para
+       `None` para não quebrar o Quality Gate e permitir nova tentativa no ciclo seguinte.
+    """
+    import sys
+    import tempfile
+
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    from etl import atualizar_temporada as espn_mod
+
+    api_mod, etl_mod = _importar_modulos_etl()
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp = Path(tmp_dir)
+        hist_path = tmp / "historico_2003_2025.json"
+        prod_path = tmp / "spfc_pontos_corridos.json"
+        meta_path = tmp / "meta.json"
+        api_path = tmp / "jogos_api_brasileirao.json"
+
+        # 1. Dia 1: football-data.org grava R36 e R37 básicos (sem gols/cartões/stats)
+        api_mod.salvar_json_atomico(
+            {
+                "metadata": {"fonte": "football-data.org (v4 / BSA)", "total_partidas": 2},
+                "partidas": [
+                    {
+                        "id": 555036,
+                        "temporada": 2026,
+                        "rodada": 36,
+                        "data": "2026-11-23",
+                        "hora": "20:00",
+                        "mando": "Fora",
+                        "adversario": "Botafogo",
+                        "adversario_estado": "RJ",
+                        "arena": None,
+                        "gols_pro": 1,
+                        "gols_contra": 1,
+                    },
+                    {
+                        "id": 555037,
+                        "temporada": 2026,
+                        "rodada": 37,
+                        "data": "2026-11-28",
+                        "hora": "19:00",
+                        "mando": "Casa",
+                        "adversario": "Remo",
+                        "adversario_estado": "PA",
+                        "arena": None,
+                        "gols_pro": 2,
+                        "gols_contra": 0,
+                    },
+                ],
+            },
+            api_path,
+        )
+        etl_mod.sincronizar_producao_com_historico(
+            dataset_historico,
+            destino_historico=hist_path,
+            destino_producao=prod_path,
+            caminho_api=api_path,
+            destino_meta=meta_path,
+        )
+        prod_d1 = _carregar_json_estrito(prod_path)
+        jogos_2026_d1 = [p for p in prod_d1["partidas"] if p["temporada"] == 2026]
+        assert len(jogos_2026_d1) == 2
+        assert all(p["gols"] is None and p["cartoes_amarelos"] is None for p in jogos_2026_d1)
+
+        # Redireciona caminhos do módulo ESPN para o diretório temporário
+        monkeypatch.setattr(espn_mod, "HISTORICO_PATH", hist_path)
+        monkeypatch.setattr(espn_mod, "OUTPUT_PATH", prod_path)
+        monkeypatch.setattr(espn_mod, "META_PATH", meta_path)
+        monkeypatch.setattr(espn_mod, "criar_sessao_http", lambda: object())
+        monkeypatch.setattr(espn_mod, "descobrir_id_spfc", lambda sessao, temporada: "2026")
+
+        def _mk_evento(ev_id: int, iso_utc: str, home_id: str, adv_nome: str, gp: int, gc: int) -> dict[str, Any]:
+            sp_home = home_id == "2026"
+            return {
+                "id": str(ev_id),
+                "date": iso_utc,
+                "competitions": [
+                    {
+                        "venue": {"fullName": "Estádio Nilton Santos" if not sp_home else "Estádio Cícero Pompeu de Toledo"},
+                        "competitors": [
+                            {
+                                "homeAway": "home" if sp_home else "away",
+                                "team": {"id": "2026", "displayName": "São Paulo", "shortDisplayName": "São Paulo"},
+                                "score": {"value": gp},
+                            },
+                            {
+                                "homeAway": "away" if sp_home else "home",
+                                "team": {"id": "9999", "displayName": adv_nome, "shortDisplayName": adv_nome},
+                                "score": {"value": gc},
+                            },
+                        ],
+                    }
+                ],
+            }
+
+        def _mk_summary(gols_jogadores: list[tuple[str, str]], am_sp: int, vm_sp: int, am_adv: int, vm_adv: int) -> dict[str, Any]:
+            details = [
+                {
+                    "scoringPlay": True,
+                    "team": {"id": "2026"},
+                    "ownGoal": False,
+                    "penaltyKick": False,
+                    "participants": [{"athlete": {"displayName": jog}}],
+                    "clock": {"displayValue": f"{minuto}'"},
+                }
+                for jog, minuto in gols_jogadores
+            ]
+            return {
+                "header": {"competitions": [{"details": details}]},
+                "boxscore": {
+                    "teams": [
+                        {
+                            "team": {"id": "2026"},
+                            "statistics": [
+                                {"name": "yellowCards", "displayValue": str(am_sp)},
+                                {"name": "redCards", "displayValue": str(vm_sp)},
+                                {"name": "totalShots", "displayValue": "12"},
+                                {"name": "shotsOnTarget", "displayValue": "5"},
+                                {"name": "possessionPct", "displayValue": "54"},
+                                {"name": "totalPasses", "displayValue": "420"},
+                                {"name": "accuratePasses", "displayValue": "360"},
+                                {"name": "foulsCommitted", "displayValue": "14"},
+                                {"name": "wonCorners", "displayValue": "6"},
+                                {"name": "offsides", "displayValue": "2"},
+                            ],
+                        },
+                        {
+                            "team": {"id": "9999"},
+                            "statistics": [
+                                {"name": "yellowCards", "displayValue": str(am_adv)},
+                                {"name": "redCards", "displayValue": str(vm_adv)},
+                            ],
+                        },
+                    ]
+                },
+                "rosters": [{"team": {"id": "2026"}, "formation": "4-2-3-1"}],
+            }
+
+        ev_r36 = _mk_evento(770036, "2026-11-23T23:00Z", "9999", "Botafogo", 1, 1)
+        ev_r37 = _mk_evento(770037, "2026-11-28T22:00Z", "2026", "Remo", 2, 0)
+
+        chamadas_summary: list[int] = []
+        summaries_por_id: dict[int, dict[str, Any]] = {
+            770036: _mk_summary([("Luciano", "58")], am_sp=3, vm_sp=1, am_adv=2, vm_adv=1),
+            770037: _mk_summary([("Jonathan Calleri", "14"), ("Luciano", "77")], am_sp=2, vm_sp=0, am_adv=3, vm_adv=0),
+        }
+
+        def _fake_get_json(sessao: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+            assert endpoint == "summary"
+            ev_id = int((params or {})["event"])
+            chamadas_summary.append(ev_id)
+            return summaries_por_id[ev_id]
+
+        monkeypatch.setattr(espn_mod, "get_json", _fake_get_json)
+
+        # 2. Dia 2: ESPN liberou apenas R36 (1 jogo < 2 no cache, mas 0 enriquecidos no cache)
+        monkeypatch.setattr(
+            espn_mod,
+            "buscar_agenda_temporada",
+            lambda sessao, spfc_id, temporada: ([ev_r36], {770036: 36}),
+        )
+        espn_mod.atualizar_temporada(temporada=2026)
+        assert chamadas_summary == [770036]
+
+        # Roda o merge determinístico logo após (como no workflow unificado)
+        etl_mod.sincronizar_producao_com_historico(
+            dataset_historico,
+            destino_historico=hist_path,
+            destino_producao=prod_path,
+            caminho_api=api_path,
+            destino_meta=meta_path,
+            salvar_historico=False,
+        )
+        prod_d2 = _carregar_json_estrito(prod_path)
+        jogos_2026_d2 = [p for p in prod_d2["partidas"] if p["temporada"] == 2026]
+        assert len(jogos_2026_d2) == 2
+        r36_d2, r37_d2 = jogos_2026_d2
+        assert r36_d2["rodada"] == 36 and r36_d2["cartoes_vermelhos"] == 1 and r36_d2["cartoes_vermelhos_adversario"] == 1
+        assert len(r36_d2["gols"]) == 1 and r36_d2["gols"][0]["jogador"] == "Luciano"
+        assert r37_d2["rodada"] == 37 and r37_d2["gols"] is None  # preservado da football-data.org
+
+        # 3. Dia 3: ESPN libera também R37 -> reaproveita cache de R36 e consulta /summary apenas para R37
+        monkeypatch.setattr(
+            espn_mod,
+            "buscar_agenda_temporada",
+            lambda sessao, spfc_id, temporada: ([ev_r36, ev_r37], {770036: 36, 770037: 37}),
+        )
+        espn_mod.atualizar_temporada(temporada=2026)
+        assert chamadas_summary == [770036, 770037]
+
+        etl_mod.sincronizar_producao_com_historico(
+            dataset_historico,
+            destino_historico=hist_path,
+            destino_producao=prod_path,
+            caminho_api=api_path,
+            destino_meta=meta_path,
+            salvar_historico=False,
+        )
+        prod_d3 = _carregar_json_estrito(prod_path)
+        jogos_2026_d3 = [p for p in prod_d3["partidas"] if p["temporada"] == 2026]
+        assert len(jogos_2026_d3) == 2
+        assert all(espn_mod.partida_tem_detalhes(p) for p in jogos_2026_d3)
+
+        # 4. Dia 4: execução repetida sem mudanças -> 0 novas chamadas /summary e zero reescrita
+        bytes_prod_antes = prod_path.read_bytes()
+        bytes_meta_antes = meta_path.read_bytes()
+        espn_mod.atualizar_temporada(temporada=2026)
+        etl_mod.sincronizar_producao_com_historico(
+            dataset_historico,
+            destino_historico=hist_path,
+            destino_producao=prod_path,
+            caminho_api=api_path,
+            destino_meta=meta_path,
+            salvar_historico=False,
+        )
+        assert chamadas_summary == [770036, 770037]
+        assert prod_path.read_bytes() == bytes_prod_antes
+        assert meta_path.read_bytes() == bytes_meta_antes
+
+        # 5. Sanitização de /summary incompleto (gols divergentes e cartões parciais)
+        summary_incompleto = {
+            "header": {"competitions": [{"details": []}]},
+            "boxscore": {
+                "teams": [
+                    {
+                        "team": {"id": "2026"},
+                        "statistics": [{"name": "yellowCards", "displayValue": "2"}],
+                    },
+                    {"team": {"id": "9999"}, "statistics": []},
+                ]
+            },
+        }
+        monkeypatch.setattr(espn_mod, "get_json", lambda s, ep, params=None: summary_incompleto)
+        reg_base = espn_mod.extrair_dados_basicos_evento(ev_r36, "2026", 2026, 36)
+        reg_sanitizado = espn_mod.enriquecer_com_summary(object(), reg_base, "2026")
+        assert reg_sanitizado["gols"] is None
+        assert all(reg_sanitizado[c] is None for c in CAMPOS_CARTOES)
+        assert espn_mod.partida_tem_detalhes(reg_sanitizado) is False

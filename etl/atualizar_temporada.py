@@ -211,6 +211,8 @@ MAPA_ARENAS: dict[str, str] = {
     "Estádio Olímpico Nilton Santos": "Estádio Nilton Santos, Rio de Janeiro",
     "Estadio Olimpico Nilton Santos": "Estádio Nilton Santos, Rio de Janeiro",
     "Estádio Nilton Santos": "Estádio Nilton Santos, Rio de Janeiro",
+    "Joao Havelange Stadium": "Estádio Nilton Santos, Rio de Janeiro",
+    "João Havelange Stadium": "Estádio Nilton Santos, Rio de Janeiro",
     "Estadio Mineirão": "Mineirão, Belo Horizonte",
     "Arena MRV": "Arena MRV, Belo Horizonte",
     "Arena Fonte Nova": "Arena Fonte Nova, Salvador",
@@ -733,9 +735,100 @@ def enriquecer_com_summary(
     if arena_summary:
         registro["arena"] = arena_summary
 
-    registro["gols"] = extrair_gols_spfc(summary, spfc_id)
-    registro.update(extrair_cartoes_e_stats(summary, spfc_id))
+    gols_extraidos = extrair_gols_spfc(summary, spfc_id)
+    if len(gols_extraidos) == registro["gols_pro"]:
+        registro["gols"] = gols_extraidos
+    else:
+        print(
+            f"[AVISO] /summary da ESPN para evento {registro['id']} "
+            f"(R{registro['rodada']} vs {registro['adversario']}) retornou "
+            f"{len(gols_extraidos)} gol(s), divergindo de gols_pro={registro['gols_pro']}. "
+            "Mantendo 'gols=None' para nova tentativa na próxima execução.",
+            file=sys.stderr,
+        )
+        registro["gols"] = None
+
+    detalhes = extrair_cartoes_e_stats(summary, spfc_id)
+    campos_cartoes = (
+        "cartoes_amarelos",
+        "cartoes_vermelhos",
+        "cartoes_amarelos_adversario",
+        "cartoes_vermelhos_adversario",
+    )
+    preenchidos = [detalhes.get(c) is not None for c in campos_cartoes]
+    if any(preenchidos) and not all(preenchidos):
+        print(
+            f"[AVISO] /summary da ESPN para evento {registro['id']} retornou cartões "
+            "parcialmente preenchidos. Zerando os 4 campos para None até a próxima execução.",
+            file=sys.stderr,
+        )
+        for campo in campos_cartoes:
+            detalhes[campo] = None
+
+    registro.update(detalhes)
     return registro
+
+
+def mesclar_partidas_espn_com_cache_basico(
+    partidas_espn: list[dict[str, Any]],
+    cache_temporada: dict[int, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """
+    Preserva partidas da temporada atual já presentes no cache local (ex.: vindas
+    da API football-data.org) que ainda não constam na resposta da ESPN, evitando
+    perda temporária de jogos quando a ESPN atrasar em relação à football-data.org.
+
+    Deduplica pelas mesmas chaves naturais do campeonato usadas no Quality Gate:
+    `(temporada, rodada)`, `(data, adversario)`, `(temporada, mando, adversario)` e `data`.
+    """
+    resultado: list[dict[str, Any]] = [dict(p) for p in partidas_espn]
+    ids_usados = {int(p["id"]) for p in resultado}
+    chaves_temp_rod = {(int(p["temporada"]), int(p["rodada"])) for p in resultado}
+    chaves_data_adv = {(str(p["data"]), str(p["adversario"])) for p in resultado}
+    chaves_confronto = {
+        (int(p["temporada"]), str(p["mando"]), str(p["adversario"])) for p in resultado
+    }
+    chaves_data = {str(p["data"]) for p in resultado}
+
+    preservados = 0
+    for cached in sorted(
+        cache_temporada.values(),
+        key=lambda item: (int(item["temporada"]), str(item["data"]), int(item["id"])),
+    ):
+        chave_tr = (int(cached["temporada"]), int(cached["rodada"]))
+        chave_da = (str(cached["data"]), str(cached["adversario"]))
+        chave_conf = (
+            int(cached["temporada"]),
+            str(cached["mando"]),
+            str(cached["adversario"]),
+        )
+        data_jogo = str(cached["data"])
+
+        if (
+            chave_tr in chaves_temp_rod
+            or chave_da in chaves_data_adv
+            or chave_conf in chaves_confronto
+            or data_jogo in chaves_data
+        ):
+            continue
+
+        registro = dict(cached)
+        if int(registro["id"]) in ids_usados:
+            novo_id = 900_000_000 + int(registro["id"])
+            while novo_id in ids_usados:
+                novo_id += 1
+            registro["id"] = novo_id
+
+        resultado.append(registro)
+        ids_usados.add(int(registro["id"]))
+        chaves_temp_rod.add(chave_tr)
+        chaves_data_adv.add(chave_da)
+        chaves_confronto.add(chave_conf)
+        chaves_data.add(data_jogo)
+        preservados += 1
+
+    resultado.sort(key=lambda p: (int(p["temporada"]), str(p["data"]), int(p["id"])))
+    return resultado, preservados
 
 
 def carregar_json_seguro(caminho: Path) -> dict[str, Any] | None:
@@ -897,25 +990,38 @@ def atualizar_temporada(temporada: int = TEMPORADA_PADRAO, forcar_refresh: bool 
     partidas_historicas = [
         p for p in historico_payload["partidas"] if int(p["temporada"]) < temporada
     ]
-    adversarios_historicos = {p["adversario"] for p in partidas_historicas}
+    temp_fim_hist = (
+        max(int(p["temporada"]) for p in partidas_historicas) if partidas_historicas else 0
+    )
 
     # 2. Carrega cache local da temporada atual (se existir em docs/data/spfc_pontos_corridos.json)
     dataset_atual = carregar_json_seguro(OUTPUT_PATH)
     cache_temporada: dict[int, dict[str, Any]] = {}
-    if not forcar_refresh and dataset_atual and isinstance(dataset_atual.get("partidas"), list):
+    partidas_intermediarias: list[dict[str, Any]] = []
+    if dataset_atual and isinstance(dataset_atual.get("partidas"), list):
         for p in dataset_atual["partidas"]:
-            if int(p.get("temporada", 0)) == temporada:
+            temp_p = int(p.get("temporada", 0))
+            if temp_fim_hist < temp_p < temporada:
+                partidas_intermediarias.append(p)
+            elif not forcar_refresh and temp_p == temporada:
                 cache_temporada[int(p["id"])] = p
+
+    base_anterior = partidas_historicas + partidas_intermediarias
+    adversarios_historicos = {p["adversario"] for p in base_anterior}
 
     # 3. Consulta API pública da ESPN (qualquer falha aborta ANTES de gravar arquivos)
     sessao = criar_sessao_http()
     spfc_id = descobrir_id_spfc(sessao, temporada)
     eventos_concluidos, mapa_rodadas = buscar_agenda_temporada(sessao, spfc_id, temporada)
 
-    if not forcar_refresh and len(eventos_concluidos) < len(cache_temporada):
+    qtd_enriquecidos_cache = sum(
+        1 for p in cache_temporada.values() if partida_tem_detalhes(p)
+    )
+    if not forcar_refresh and len(eventos_concluidos) < qtd_enriquecidos_cache:
         raise RuntimeError(
             f"API ESPN retornou apenas {len(eventos_concluidos)} jogos finalizados em {temporada}, "
-            f"menos que os {len(cache_temporada)} já existentes em cache. Abortando para evitar perda de dados."
+            f"menos que os {qtd_enriquecidos_cache} jogos já enriquecidos em cache. "
+            "Abortando para evitar perda de dados."
         )
 
     partidas_temporada: list[dict[str, Any]] = []
@@ -953,6 +1059,16 @@ def atualizar_temporada(temporada: int = TEMPORADA_PADRAO, forcar_refresh: bool 
             partidas_temporada.append(registro)
             qtd_api += 1
 
+    # Preserva jogos recentes de outra fonte (ex.: football-data.org) ainda não liberados pela ESPN
+    partidas_temporada, qtd_preservados_basicos = mesclar_partidas_espn_com_cache_basico(
+        partidas_temporada, cache_temporada
+    )
+    if qtd_preservados_basicos > 0:
+        print(
+            f"[INFO] Preservado(s) {qtd_preservados_basicos} jogo(s) da temporada {temporada} "
+            "ainda não retornado(s) pela ESPN (serão enriquecidos assim que disponíveis)."
+        )
+
     if novos_clubes:
         print(
             f"[INFO] Clube(s) inédito(s) na era dos pontos corridos em {temporada}: "
@@ -961,7 +1077,7 @@ def atualizar_temporada(temporada: int = TEMPORADA_PADRAO, forcar_refresh: bool 
 
     # 4. Mescla histórico + temporada atual ordenados cronologicamente
     todas_partidas = sorted(
-        partidas_historicas + partidas_temporada,
+        base_anterior + partidas_temporada,
         key=lambda p: (int(p["temporada"]), str(p["data"]), int(p["id"])),
     )
 
@@ -981,6 +1097,11 @@ def atualizar_temporada(temporada: int = TEMPORADA_PADRAO, forcar_refresh: bool 
     # 5. Gera docs/data/meta.json com data/hora da última execução em BRT e contagem de jogos
     meta_anterior = carregar_json_seguro(META_PATH)
     ultima_partida_data = todas_partidas[-1]["data"] if todas_partidas else None
+    fonte_atualizacao = (
+        "ESPN API (bra.1) + football-data.org (v4 / BSA)"
+        if qtd_preservados_basicos > 0
+        else "ESPN API (bra.1)"
+    )
     meta_payload = {
         "atualizado_em": agora_brt.isoformat(timespec="seconds"),
         "atualizado_em_brt": agora_brt.strftime("%d/%m/%Y às %H:%M"),
@@ -989,10 +1110,10 @@ def atualizar_temporada(temporada: int = TEMPORADA_PADRAO, forcar_refresh: bool 
         "temporada_fim": novo_payload["metadata"]["temporada_fim"],
         "temporada_atual": temporada,
         "total_jogos": len(todas_partidas),
-        "jogos_historico": len(partidas_historicas),
+        "jogos_historico": len(base_anterior),
         "jogos_temporada_atual": len(partidas_temporada),
         "ultima_partida_data": ultima_partida_data,
-        "fonte_atualizacao": "ESPN API (bra.1)",
+        "fonte_atualizacao": fonte_atualizacao,
     }
 
     # Só regrava meta.json se houver alteração nos jogos ou se meta.json ainda não existir

@@ -51,7 +51,7 @@
     ],
     "fonte_cartoes": "campeonato-brasileiro-cartoes.csv (2014–2024), campeonato-brasileiro-estatisticas-full.csv (2025) e API pública ESPN (2026)",
     "fonte_gols": "campeonato-brasileiro-gols.csv (2014–2025) e API pública ESPN (2026)",
-    "gerado_em": "2026-11-24T17:16:15Z"
+    "gerado_em": "2026-11-24T20:34:14Z"
   },
   "partidas": [
     {
@@ -32866,7 +32866,7 @@
       "impedimentos": 0
     },
     {
-      "id": 555093,
+      "id": 401841326,
       "temporada": 2026,
       "rodada": 36,
       "data": "2026-11-23",
@@ -32881,20 +32881,27 @@
       "resultado": "E",
       "pontos": 1,
       "tecnico_spfc": null,
-      "formacao_spfc": null,
-      "cartoes_amarelos": null,
-      "cartoes_vermelhos": null,
-      "cartoes_amarelos_adversario": null,
-      "cartoes_vermelhos_adversario": null,
-      "gols": null,
-      "chutes": null,
-      "chutes_no_alvo": null,
-      "posse_de_bola": null,
-      "passes": null,
-      "precisao_passes": null,
-      "faltas": null,
-      "escanteios": null,
-      "impedimentos": null
+      "formacao_spfc": "3-5-2",
+      "cartoes_amarelos": 4,
+      "cartoes_vermelhos": 1,
+      "cartoes_amarelos_adversario": 1,
+      "cartoes_vermelhos_adversario": 1,
+      "gols": [
+        {
+          "jogador": "Pedro Lima",
+          "minuto": "28",
+          "tipo": "Normal",
+          "gol_contra": false
+        }
+      ],
+      "chutes": 13,
+      "chutes_no_alvo": 7,
+      "posse_de_bola": 43,
+      "passes": 371,
+      "precisao_passes": 80,
+      "faltas": 19,
+      "escanteios": 3,
+      "impedimentos": 3
     }
   ]
 }

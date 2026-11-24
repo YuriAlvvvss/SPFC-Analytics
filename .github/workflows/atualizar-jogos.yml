@@ -1,26 +1,37 @@
-name: Atualizar Jogos SPFC (ESPN)
+name: Atualizar Jogos SPFC (ESPN — Manual)
 
 on:
-  schedule:
-    # Segundas e sextas-feiras às 08:00 BRT (11:00 UTC)
-    - cron: "0 11 * * 1,5"
+  # A atualização automática diária (03:00 e 12:00 BRT) foi unificada em atualizar-dados.yml.
+  # Este workflow permanece disponível para disparo manual sob demanda (inclusive --force-refresh).
   workflow_dispatch:
-
-permissions:
-  contents: write
-
-concurrency:
-  group: atualizar-jogos-spfc
-  cancel-in-progress: false
+    inputs:
+      force_refresh:
+        description: "Ignorar cache local e reconsultar /summary de todos os jogos da temporada atual"
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   atualizar-dados:
-    name: Carga incremental via API ESPN
+    name: Carga incremental via API ESPN + Quality Gate
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: write
+
+    concurrency:
+      group: update-data
+      cancel-in-progress: false
+
+    outputs:
+      has_changes: ${{ steps.check_changes.outputs.has_changes }}
+
     steps:
-      - name: Checkout do repositório
+      - name: Checkout do repositório (main)
         uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
 
       - name: Configurar Python
         uses: actions/setup-python@v5
@@ -32,19 +43,88 @@ jobs:
         run: python -m pip install --upgrade pip && pip install -r requirements.txt
 
       - name: Executar atualização incremental (ESPN)
-        run: python etl/atualizar_temporada.py
+        run: |
+          if [ "${{ inputs.force_refresh }}" = "true" ]; then
+            python etl/atualizar_temporada.py --force-refresh
+          else
+            python etl/atualizar_temporada.py
+          fi
+
+      - name: Sincronizar merge determinístico (preserva jogos de outras fontes)
+        run: python etl/processar_dados.py
 
       - name: Quality Gate — Validar qualidade dos dados (pytest)
         run: pytest -v
 
-      - name: Commit e push se houver alterações em docs/data/
+      - name: Verificar alterações reais em docs/data/
+        id: check_changes
         run: |
-          if [ -n "$(git status --porcelain docs/data/)" ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add docs/data/
-            git commit -m "chore(data): atualiza jogos SPFC via ESPN"
-            git push
+          CHANGED="$(git status --porcelain -- \
+            docs/data/spfc_pontos_corridos.json \
+            docs/data/meta.json)"
+          if [ -n "$CHANGED" ]; then
+            echo "Alterações reais detectadas:"
+            echo "$CHANGED"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
           else
             echo "Nenhuma alteração real em docs/data/. Nada a commitar."
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Commitar e enviar alterações de dados para main
+        if: steps.check_changes.outputs.has_changes == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- \
+            docs/data/spfc_pontos_corridos.json \
+            docs/data/meta.json
+          git commit -m "chore(data): atualiza jogos SPFC via ESPN"
+          git pull --rebase origin main
+          git push origin main
+
+  build:
+    name: Preparar artefato do GitHub Pages
+    needs: atualizar-dados
+    if: needs.atualizar-dados.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pages: write
+
+    steps:
+      - name: Checkout do repositório (main atualizada)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Configurar GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Empacotar artefato do Pages (docs/)
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./docs
+
+  deploy:
+    name: Deploy no GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+
+    permissions:
+      pages: write
+      id-token: write
+
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Publicar no GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

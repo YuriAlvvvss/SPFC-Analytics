@@ -1,9 +1,9 @@
-name: Atualizar Dados do Brasileirão (API + Deploy)
+name: Atualizar Dados do Brasileirão (API + ESPN + Deploy)
 
 on:
   schedule:
-    # Todos os dias às 03:00 BRT (06:00 UTC)
-    - cron: "0 6 * * *"
+    # Todos os dias às 03:00 BRT (06:00 UTC) e às 12:00 BRT (15:00 UTC)
+    - cron: "0 6,15 * * *"
   workflow_dispatch:
 
 jobs:
@@ -52,6 +52,16 @@ jobs:
           FOOTBALL_DATA_API_KEY: ${{ secrets.FOOTBALL_DATA_API_KEY }}
         run: python etl/atualizar_jogos_api.py
 
+      - name: Enriquecer temporada atual via API ESPN (gols, cartões e estatísticas)
+        id: espn_enrichment
+        continue-on-error: true
+        run: python etl/atualizar_temporada.py
+
+      - name: Registrar aviso se o enriquecimento via ESPN falhou
+        if: steps.espn_enrichment.outcome == 'failure'
+        run: |
+          echo "::warning::A consulta complementar à API ESPN falhou nesta execução. O pipeline seguirá com os dados da football-data.org e tentará enriquecer novamente na próxima execução."
+
       - name: Executar ETL e merge determinístico
         run: python etl/processar_dados.py
 
@@ -85,7 +95,7 @@ jobs:
             docs/data/spfc_pontos_corridos.json \
             docs/data/meta.json \
             docs/data/proximo_jogo.json
-          git commit -m "chore(data): atualiza jogos do Brasileirão via API"
+          git commit -m "chore(data): atualiza jogos do Brasileirão (API + ESPN)"
           git pull --rebase origin main
           git push origin main
 
