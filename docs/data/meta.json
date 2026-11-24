@@ -1,13 +1,13 @@
 {
-  "atualizado_em": "2026-11-21T16:17:33-03:00",
-  "atualizado_em_brt": "21/11/2026 às 16:17",
+  "atualizado_em": "2026-11-24T14:16:15-03:00",
+  "atualizado_em_brt": "24/11/2026 às 14:16",
   "fuso_horario": "America/Sao_Paulo",
   "temporada_inicio": 2003,
   "temporada_fim": 2026,
   "temporada_atual": 2026,
-  "total_jogos": 929,
+  "total_jogos": 930,
   "jogos_historico": 894,
-  "jogos_temporada_atual": 35,
-  "ultima_partida_data": "2026-11-19",
-  "fonte_atualizacao": "ESPN API (bra.1)"
+  "jogos_temporada_atual": 36,
+  "ultima_partida_data": "2026-11-23",
+  "fonte_atualizacao": "ESPN API (bra.1) + football-data.org (v4 / BSA)"
 }

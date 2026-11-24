@@ -3,11 +3,11 @@
     "fonte": "football-data.org (v4 / BSA)",
     "clube": "São Paulo FC",
     "competicao": "Brasileirão Série A",
-    "atualizado_em": "2026-11-22T14:16:09-03:00",
+    "atualizado_em": "2026-11-24T14:16:14-03:00",
     "temporadas": [
       2026
     ],
-    "total_partidas": 35
+    "total_partidas": 36
   },
   "partidas": [
     {
@@ -1079,6 +1079,37 @@
       "saldo_gols": -1,
       "resultado": "D",
       "pontos": 0,
+      "tecnico_spfc": null,
+      "formacao_spfc": null,
+      "cartoes_amarelos": null,
+      "cartoes_vermelhos": null,
+      "cartoes_amarelos_adversario": null,
+      "cartoes_vermelhos_adversario": null,
+      "gols": null,
+      "chutes": null,
+      "chutes_no_alvo": null,
+      "posse_de_bola": null,
+      "passes": null,
+      "precisao_passes": null,
+      "faltas": null,
+      "escanteios": null,
+      "impedimentos": null
+    },
+    {
+      "id": 555093,
+      "temporada": 2026,
+      "rodada": 36,
+      "data": "2026-11-23",
+      "hora": "20:00",
+      "mando": "Fora",
+      "adversario": "Botafogo",
+      "adversario_estado": "RJ",
+      "arena": "Estádio Nilton Santos, Rio de Janeiro",
+      "gols_pro": 1,
+      "gols_contra": 1,
+      "saldo_gols": 0,
+      "resultado": "E",
+      "pontos": 1,
       "tecnico_spfc": null,
       "formacao_spfc": null,
       "cartoes_amarelos": null,
