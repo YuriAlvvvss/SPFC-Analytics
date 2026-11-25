@@ -16,8 +16,11 @@ import json
 import math
 from pathlib import Path
 import re
+import sys
+import tempfile
 from typing import Any
 import unicodedata
+import xml.etree.ElementTree as ET
 
 import pytest
 
@@ -34,8 +37,7 @@ PROXIMO_JOGO_PATH = REPO_ROOT / "docs" / "data" / "proximo_jogo.json"
 ALL_JSON_PATHS = (PROD_DATA_PATH, HIST_DATA_PATH, META_DATA_PATH)
 DATASET_PATHS = (PROD_DATA_PATH, HIST_DATA_PATH)
 
-# Fundação do São Paulo FC: 25/01/1930; início dos pontos corridos: 2003
-DATA_FUNDACAO_SPFC = date(1930, 1, 25)
+# Início da era dos pontos corridos (implica datas posteriores à fundação em 25/01/1930)
 INICIO_PONTOS_CORRIDOS = date(2003, 1, 1)
 ANO_INICIO_ERA_MODERNA = 2014
 ANO_FIM_HISTORICO_KAGGLE = 2025
@@ -343,6 +345,11 @@ def test_schema_metadata_completo(dataset_partidas: tuple[str, dict[str, Any]]) 
         motivo = _texto_invalido(meta[campo])
         assert motivo is None, f"[{nome}] metadata.{campo} inválido: {motivo}"
 
+    try:
+        datetime.fromisoformat(meta["gerado_em"].replace("Z", "+00:00"))
+    except ValueError as exc:
+        pytest.fail(f"[{nome}] metadata.gerado_em não é ISO 8601 válido ({meta['gerado_em']!r}): {exc}")
+
     for campo in ("temporada_inicio", "temporada_fim", "total_partidas"):
         assert _eh_inteiro(meta[campo]), (
             f"[{nome}] metadata.{campo} deve ser int, obtido {meta[campo]!r}"
@@ -384,6 +391,9 @@ def test_schema_e_completude_campos_obrigatorios_partidas(
             elif isinstance(val, str) and not val.strip():
                 erros.append(f"{_fmt_partida(idx, p)} campo obrigatório '{campo}' está vazio ({val!r})")
 
+        if not _eh_inteiro(p.get("id")) or p["id"] <= 0:
+            erros.append(f"{_fmt_partida(idx, p)} campo 'id' deve ser int > 0 (obtido {p.get('id')!r})")
+
         for campo, val in p.items():
             if _eh_nan_ou_inf(val):
                 erros.append(f"{_fmt_partida(idx, p)} campo '{campo}' contém NaN/Infinity ({val!r})")
@@ -416,15 +426,25 @@ def test_schema_meta_sincronizacao(meta_sincronizacao: dict[str, Any]) -> None:
         )
 
     try:
-        datetime.fromisoformat(meta_sincronizacao["atualizado_em"])
+        dt_atualizado = datetime.fromisoformat(meta_sincronizacao["atualizado_em"])
     except ValueError as exc:
         pytest.fail(
             f"[meta.json] 'atualizado_em' não é ISO 8601 válido ({meta_sincronizacao['atualizado_em']!r}): {exc}"
         )
+    assert dt_atualizado.tzinfo is not None, (
+        f"[meta.json] 'atualizado_em' deve incluir fuso horário explícito: {meta_sincronizacao['atualizado_em']!r}"
+    )
 
     assert RE_DATA_ISO.fullmatch(meta_sincronizacao["ultima_partida_data"]), (
         f"[meta.json] 'ultima_partida_data' fora do padrão YYYY-MM-DD: {meta_sincronizacao['ultima_partida_data']!r}"
     )
+    try:
+        date.fromisoformat(meta_sincronizacao["ultima_partida_data"])
+    except ValueError as exc:
+        pytest.fail(
+            f"[meta.json] 'ultima_partida_data' não é data válida no calendário "
+            f"({meta_sincronizacao['ultima_partida_data']!r}): {exc}"
+        )
 
 
 def test_cobertura_era_moderna_cartoes_e_gols(dataset_partidas: tuple[str, dict[str, Any]]) -> None:
@@ -498,7 +518,7 @@ def test_datas_horas_e_intervalo_coerente(dataset_partidas: tuple[str, dict[str,
             erros.append(f"{_fmt_partida(idx, p)} data inexistente no calendário: {data_str!r}")
             continue
 
-        if dt < DATA_FUNDACAO_SPFC or dt < INICIO_PONTOS_CORRIDOS:
+        if dt < INICIO_PONTOS_CORRIDOS:
             erros.append(
                 f"{_fmt_partida(idx, p)} data anterior ao início dos pontos corridos ({INICIO_PONTOS_CORRIDOS}): {dt}"
             )
@@ -755,6 +775,7 @@ def test_rodadas_e_estrutura_temporadas(dataset_partidas: tuple[str, dict[str, A
     """Valida limites de rodadas por edição e contagem de jogos em temporadas encerradas e atual."""
     nome, payload = dataset_partidas
     partidas = payload["partidas"]
+    temporada_inicio = payload["metadata"]["temporada_inicio"]
     temporada_fim = payload["metadata"]["temporada_fim"]
     por_temporada: dict[int, list[tuple[int, dict[str, Any]]]] = defaultdict(list)
     erros: list[str] = []
@@ -766,6 +787,13 @@ def test_rodadas_e_estrutura_temporadas(dataset_partidas: tuple[str, dict[str, A
         if not _eh_inteiro(rod) or not (1 <= rod <= max_rod):
             erros.append(f"{_fmt_partida(idx, p)} rodada {rod!r} fora da faixa 1..{max_rod}")
         por_temporada[temp].append((idx, p))
+
+    temporadas_esperadas = set(range(temporada_inicio, temporada_fim + 1))
+    temporadas_ausentes = sorted(temporadas_esperadas - set(por_temporada.keys()))
+    if temporadas_ausentes:
+        erros.append(
+            f"Temporada(s) ausente(s) na série contínua {temporada_inicio}..{temporada_fim}: {temporadas_ausentes}"
+        )
 
     for temp, itens in sorted(por_temporada.items()):
         esperado = _max_rodadas_temporada(temp)
@@ -927,6 +955,9 @@ def test_consistencia_entre_historico_producao_e_meta(
     )
 
     temp_atual = meta_sincronizacao["temporada_atual"]
+    assert temp_atual == meta_sincronizacao["temporada_fim"], (
+        f"[meta.json] temporada_atual={temp_atual} diverge de temporada_fim={meta_sincronizacao['temporada_fim']}"
+    )
     jogos_temp_atual = sum(1 for p in partidas_prod if p["temporada"] == temp_atual)
     jogos_hist_esperado = sum(1 for p in partidas_prod if p["temporada"] < temp_atual)
     ultima_data = max(p["data"] for p in partidas_prod)
@@ -967,8 +998,6 @@ def test_consistencia_entre_historico_producao_e_meta(
 
 
 def _importar_modulos_etl() -> tuple[Any, Any]:
-    import sys
-
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
     from etl import atualizar_jogos_api, processar_dados
@@ -1316,8 +1345,6 @@ def test_schema_proximo_jogo_quando_presente() -> None:
     estrita offline) e, quando `docs/data/proximo_jogo.json` existir na pasta de
     produção, valida integralmente o arquivo real.
     """
-    import tempfile
-
     api_mod, _ = _importar_modulos_etl()
 
     # Sempre exercita serialização atômica + leitura estrita + validação de schema offline
@@ -1345,7 +1372,11 @@ def test_schema_proximo_jogo_quando_presente() -> None:
         raw = PROXIMO_JOGO_PATH.read_bytes()
         assert len(raw) > 0, "docs/data/proximo_jogo.json está vazio."
         assert not raw.startswith(b"\xef\xbb\xbf"), "docs/data/proximo_jogo.json contém BOM UTF-8."
-        assert "\ufffd" not in raw.decode("utf-8"), "docs/data/proximo_jogo.json contém U+FFFD."
+        try:
+            texto_real = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            pytest.fail(f"docs/data/proximo_jogo.json não está em UTF-8 válido: {exc}")
+        assert "\ufffd" not in texto_real, "docs/data/proximo_jogo.json contém U+FFFD."
 
         payload_real = _carregar_json_estrito(PROXIMO_JOGO_PATH)
         _validar_schema_proximo_jogo(payload_real)
@@ -1361,8 +1392,6 @@ def test_sincronizacao_etl_offline_e_com_api_incremental(
       e atualiza `meta.json` com contadores consistentes.
     - É idempotente em execuções repetidas.
     """
-    import tempfile
-
     api_mod, etl_mod = _importar_modulos_etl()
 
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1471,8 +1500,6 @@ def test_api_idempotencia_contra_commits_fantasma(
     4. Em transição para fim de campeonato (`tem_proximo_jogo=False`), grava uma
        vez e permanece idempotente nas execuções seguintes.
     """
-    import tempfile
-
     api_mod, _ = _importar_modulos_etl()
 
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1637,14 +1664,8 @@ def test_integracao_hibrida_api_e_espn_sem_regressao(
     5. Resposta `/summary` incompleta (gols divergentes ou cartões parciais) é sanitizada para
        `None` para não quebrar o Quality Gate e permitir nova tentativa no ciclo seguinte.
     """
-    import sys
-    import tempfile
-
-    if str(REPO_ROOT) not in sys.path:
-        sys.path.insert(0, str(REPO_ROOT))
-    from etl import atualizar_temporada as espn_mod
-
     api_mod, etl_mod = _importar_modulos_etl()
+    from etl import atualizar_temporada as espn_mod
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp = Path(tmp_dir)
@@ -1878,8 +1899,6 @@ def test_integracao_hibrida_api_e_espn_sem_regressao(
 
 def test_sitemap_xml_valido_daily_e_iso() -> None:
     """Valida que `docs/sitemap.xml` existe, está em UTF-8 limpo, usa `daily` e `<lastmod>` ISO."""
-    import xml.etree.ElementTree as ET
-
     sitemap_path = REPO_ROOT / "docs" / "sitemap.xml"
     assert sitemap_path.exists() and sitemap_path.is_file(), f"Sitemap ausente: {sitemap_path}"
 
@@ -1909,9 +1928,6 @@ def test_sitemap_xml_valido_daily_e_iso() -> None:
 
 def test_atualizar_sitemap_xml_etl_idempotente() -> None:
     """Valida a rotina `atualizar_sitemap_xml` do ETL (weekly -> daily, ISO date e idempotência)."""
-    import tempfile
-    import xml.etree.ElementTree as ET
-
     _, etl_mod = _importar_modulos_etl()
     ns = f"{{{etl_mod.SITEMAP_NS}}}"
 
@@ -1975,3 +1991,264 @@ def test_atualizar_sitemap_xml_etl_idempotente() -> None:
         assert root_4.findtext(f"{ns}url/{ns}lastmod") == "2026-11-26"
         assert root_4.findtext(f"{ns}url/{ns}changefreq") == "daily"
         assert root_4.findtext(f"{ns}url/{ns}priority") == "1.0"
+
+
+def test_espn_edge_cases_resiliencia_e_force_refresh(
+    dataset_historico: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Valida offline os edge cases endurecidos em `etl/atualizar_temporada.py`:
+    1. Subobjetos explícitos `None` no payload ESPN (`address`, `header`, `boxscore`, `gameInfo`, `status`)
+       não disparam `AttributeError`.
+    2. `parse_int_ou_none` rejeita `bool`, `"NaN"` e `"Infinity"` sem `OverflowError`.
+    3. `normalizar_minuto` converte `"94'"` em `"90+4"`; gols com jogador vazio ou minuto inválido
+       são sanitizados para `gols=None`; formação inválida vira `None`; `chutes_no_alvo > chutes`
+       e `precisao_passes > 100` são saneados para o domínio válido; `arena` ausente recebe fallback.
+    4. `--force-refresh` reconsulta `/summary` dos jogos da ESPN sem descartar jogos recentes
+       preservados de outra fonte (`football-data.org`).
+    """
+    api_mod, etl_mod = _importar_modulos_etl()
+    from etl import atualizar_temporada as espn_mod
+
+    # 1. parse_int_ou_none e normalizar_minuto
+    assert espn_mod.parse_int_ou_none(True) is None
+    assert espn_mod.parse_int_ou_none(False) is None
+    assert espn_mod.parse_int_ou_none("Infinity") is None
+    assert espn_mod.parse_int_ou_none("-inf") is None
+    assert espn_mod.parse_int_ou_none("NaN") is None
+    assert espn_mod.parse_int_ou_none("54%") == 54
+    assert espn_mod.normalizar_minuto("94'") == "90+4"
+    assert espn_mod.minuto_valido_v1("90+4") is True
+    assert espn_mod.minuto_valido_v1("0") is False
+    assert espn_mod.minuto_valido_v1("") is False
+
+    # 2. normalizar_arena com address=None
+    assert espn_mod.normalizar_arena({"fullName": "Estadio Teste", "address": None}) == "Estádio Teste"
+
+    # 3. extrair_cartoes_e_stats e enriquecer_com_summary com subobjetos None e anomalias numéricas
+    summary_anomalo = {
+        "gameInfo": None,
+        "header": {
+            "competitions": [
+                {
+                    "details": [
+                        {
+                            "scoringPlay": True,
+                            "team": {"id": "2026"},
+                            "ownGoal": False,
+                            "penaltyKick": False,
+                            "participants": [{"athlete": None}],
+                            "clock": None,
+                        }
+                    ]
+                }
+            ]
+        },
+        "boxscore": {
+            "teams": [
+                {
+                    "team": {"id": "2026"},
+                    "statistics": [
+                        {"name": "yellowCards", "displayValue": "2"},
+                        {"name": "redCards", "displayValue": "0"},
+                        {"name": "totalShots", "displayValue": "5"},
+                        {"name": "shotsOnTarget", "displayValue": "9"},
+                        {"name": "possessionPct", "displayValue": "140"},
+                        {"name": "totalPasses", "displayValue": "100"},
+                        {"name": "accuratePasses", "displayValue": "120"},
+                    ],
+                },
+                {
+                    "team": {"id": "9999"},
+                    "statistics": [
+                        {"name": "yellowCards", "displayValue": "1"},
+                        {"name": "redCards", "displayValue": "0"},
+                    ],
+                },
+            ]
+        },
+        "rosters": [{"team": {"id": "2026"}, "formation": "4-4-2 Diamond"}],
+    }
+
+    reg_base = {
+        "id": 779999,
+        "temporada": 2026,
+        "rodada": 36,
+        "data": "2026-11-23",
+        "hora": "20:00",
+        "mando": "Casa",
+        "adversario": "Remo",
+        "adversario_estado": "PA",
+        "arena": None,
+        "gols_pro": 1,
+        "gols_contra": 0,
+        "saldo_gols": 1,
+        "resultado": "V",
+        "pontos": 3,
+    }
+    monkeypatch.setattr(espn_mod, "get_json", lambda s, ep, params=None: summary_anomalo)
+    reg_enr = espn_mod.enriquecer_com_summary(object(), dict(reg_base), "2026")
+    assert reg_enr["arena"] == espn_mod.ARENA_CASA_SPFC
+    assert reg_enr["gols"] is None
+    assert reg_enr["formacao_spfc"] is None
+    assert reg_enr["chutes"] == 5 and reg_enr["chutes_no_alvo"] == 5
+    assert reg_enr["posse_de_bola"] is None
+    assert reg_enr["precisao_passes"] == 100
+
+    # 4. buscar_agenda_temporada ignora week=True (bool) e tolera status=None / ValueError em fixtures
+    def _fake_schedule_get(sessao: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if (params or {}).get("fixture") == "true":
+            raise ValueError("JSON inválido em fixtures")
+        return {
+            "events": [
+                {
+                    "id": "770001",
+                    "date": "2026-01-28T23:00Z",
+                    "week": True,
+                    "competitions": [{"status": None}],
+                },
+                {
+                    "id": "770002",
+                    "date": "2026-02-04T23:00Z",
+                    "week": {"number": 2},
+                    "competitions": [{"status": {"type": {"completed": True}}}],
+                },
+            ]
+        }
+
+    monkeypatch.setattr(espn_mod, "get_json", _fake_schedule_get)
+    concluidos, mapa_rod = espn_mod.buscar_agenda_temporada(object(), "2026", 2026)
+    assert len(concluidos) == 1 and concluidos[0]["id"] == "770002"
+    assert mapa_rod[770001] == 1  # caiu no fallback idx=1 em vez de aceitar bool True
+    assert mapa_rod[770002] == 2
+
+    # 5. --force-refresh reconsulta /summary mas preserva jogo recente ainda ausente na ESPN
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp = Path(tmp_dir)
+        hist_path = tmp / "historico_2003_2025.json"
+        prod_path = tmp / "spfc_pontos_corridos.json"
+        meta_path = tmp / "meta.json"
+        api_path = tmp / "jogos_api_brasileirao.json"
+
+        api_mod.salvar_json_atomico(
+            {
+                "metadata": {"fonte": "football-data.org (v4 / BSA)", "total_partidas": 2},
+                "partidas": [
+                    {
+                        "id": 555036,
+                        "temporada": 2026,
+                        "rodada": 36,
+                        "data": "2026-11-23",
+                        "hora": "20:00",
+                        "mando": "Casa",
+                        "adversario": "Botafogo",
+                        "adversario_estado": "RJ",
+                        "arena": None,
+                        "gols_pro": 1,
+                        "gols_contra": 0,
+                    },
+                    {
+                        "id": 555037,
+                        "temporada": 2026,
+                        "rodada": 37,
+                        "data": "2026-11-28",
+                        "hora": "19:00",
+                        "mando": "Fora",
+                        "adversario": "Remo",
+                        "adversario_estado": "PA",
+                        "arena": None,
+                        "gols_pro": 2,
+                        "gols_contra": 1,
+                    },
+                ],
+            },
+            api_path,
+        )
+        etl_mod.sincronizar_producao_com_historico(
+            dataset_historico,
+            destino_historico=hist_path,
+            destino_producao=prod_path,
+            caminho_api=api_path,
+            destino_meta=meta_path,
+        )
+
+        ev_r36 = {
+            "id": "770036",
+            "date": "2026-11-23T23:00Z",
+            "competitions": [
+                {
+                    "venue": None,
+                    "competitors": [
+                        {
+                            "homeAway": "home",
+                            "team": {"id": "2026", "displayName": "São Paulo"},
+                            "score": {"value": 1},
+                        },
+                        {
+                            "homeAway": "away",
+                            "team": {"id": "9999", "displayName": "Botafogo"},
+                            "score": {"value": 0},
+                        },
+                    ],
+                }
+            ],
+        }
+        summary_calls: list[int] = []
+
+        def _fake_summary(sessao: Any, endpoint: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+            assert endpoint == "summary"
+            summary_calls.append(int((params or {})["event"]))
+            return {
+                "header": {
+                    "competitions": [
+                        {
+                            "details": [
+                                {
+                                    "scoringPlay": True,
+                                    "team": {"id": "2026"},
+                                    "ownGoal": False,
+                                    "penaltyKick": False,
+                                    "participants": [{"athlete": {"displayName": "Luciano"}}],
+                                    "clock": {"displayValue": "40'"},
+                                }
+                            ]
+                        }
+                    ]
+                },
+                "boxscore": {
+                    "teams": [
+                        {
+                            "team": {"id": "2026"},
+                            "statistics": [
+                                {"name": "yellowCards", "displayValue": "1"},
+                                {"name": "redCards", "displayValue": "0"},
+                                {"name": "totalShots", "displayValue": "10"},
+                            ],
+                        },
+                        {
+                            "team": {"id": "9999"},
+                            "statistics": [
+                                {"name": "yellowCards", "displayValue": "2"},
+                                {"name": "redCards", "displayValue": "0"},
+                            ],
+                        },
+                    ]
+                },
+            }
+
+        monkeypatch.setattr(espn_mod, "HISTORICO_PATH", hist_path)
+        monkeypatch.setattr(espn_mod, "OUTPUT_PATH", prod_path)
+        monkeypatch.setattr(espn_mod, "META_PATH", meta_path)
+        monkeypatch.setattr(espn_mod, "criar_sessao_http", lambda: object())
+        monkeypatch.setattr(espn_mod, "descobrir_id_spfc", lambda s, t: "2026")
+        monkeypatch.setattr(espn_mod, "buscar_agenda_temporada", lambda s, sid, t: ([ev_r36], {770036: 36}))
+        monkeypatch.setattr(espn_mod, "get_json", _fake_summary)
+
+        espn_mod.atualizar_temporada(temporada=2026, forcar_refresh=True)
+        assert summary_calls == [770036]
+        prod_after = _carregar_json_estrito(prod_path)
+        jogos_2026 = [p for p in prod_after["partidas"] if p["temporada"] == 2026]
+        assert len(jogos_2026) == 2
+        assert jogos_2026[0]["rodada"] == 36 and jogos_2026[0]["arena"] == espn_mod.ARENA_CASA_SPFC
+        assert jogos_2026[1]["rodada"] == 37 and jogos_2026[1]["adversario"] == "Remo"

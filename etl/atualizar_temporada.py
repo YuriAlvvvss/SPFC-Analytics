@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timedelta, timezone
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -35,8 +36,14 @@ META_PATH = BASE_DIR / "docs" / "data" / "meta.json"
 
 # Configuração da API pública da ESPN (Brasileirão Série A)
 ESPN_BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/bra.1"
+ANO_INICIO_ESPN = 2026
 TEMPORADA_PADRAO = 2026
 HTTP_TIMEOUT = 20
+
+ARENA_CASA_SPFC = "MorumBIS, São Paulo"
+ARENA_FORA_FALLBACK = "Estádio não informado"
+RE_MINUTO_VALIDO = re.compile(r"^(\d+)(?:\+(\d+))?$")
+RE_FORMACAO_VALIDA = re.compile(r"^\d+(-\d+)+$")
 
 HEADERS = {
     "User-Agent": (
@@ -295,7 +302,9 @@ def normalizar_arena(venue: dict[str, Any] | None) -> str | None:
         return MAPA_ARENAS[full_name]
 
     nome = re.sub(r"^Estadio\b", "Estádio", full_name)
-    cidade = " ".join(str(venue.get("address", {}).get("city") or "").split())
+    address = venue.get("address")
+    cidade_raw = address.get("city") if isinstance(address, dict) else ""
+    cidade = " ".join(str(cidade_raw or "").split())
     if cidade == "Sao Paulo":
         cidade = "São Paulo"
 
@@ -309,7 +318,22 @@ def normalizar_minuto(clock_str: str | None) -> str:
     if not clock_str:
         return ""
     limpo = re.sub(r"['\s]", "", str(clock_str))
+    match = RE_MINUTO_VALIDO.fullmatch(limpo)
+    if match and match.group(2) is None:
+        base = int(match.group(1))
+        if 91 <= base <= 120:
+            return f"90+{base - 90}"
     return limpo
+
+
+def minuto_valido_v1(minuto: str) -> bool:
+    """Verifica se o minuto está no formato v1 plausível (1..90 e acréscimo 0..30)."""
+    match = RE_MINUTO_VALIDO.fullmatch(minuto or "")
+    if not match:
+        return False
+    base = int(match.group(1))
+    acr = int(match.group(2)) if match.group(2) is not None else 0
+    return 1 <= base <= 90 and 0 <= acr <= 30
 
 
 def chave_ordenacao_minuto(minuto: str) -> tuple[int, int]:
@@ -324,18 +348,35 @@ def chave_ordenacao_minuto(minuto: str) -> tuple[int, int]:
 
 
 def parse_int_ou_none(valor: Any) -> int | None:
-    """Converte número/string em int ou None de forma segura."""
-    if valor is None or valor == "":
+    """Converte número/string em int ou None de forma segura (rejeitando bool/NaN/Inf)."""
+    if valor is None or valor == "" or isinstance(valor, bool):
         return None
     try:
-        return int(round(float(str(valor).replace(",", ".").rstrip("%").strip())))
-    except (ValueError, TypeError):
+        num = float(str(valor).replace(",", ".").rstrip("%").strip())
+        if not math.isfinite(num):
+            return None
+        return int(round(num))
+    except (ValueError, TypeError, OverflowError):
         return None
+
+
+def parse_nonneg_int_ou_none(valor: Any) -> int | None:
+    """Converte para inteiro >= 0 ou None."""
+    num = parse_int_ou_none(valor)
+    return num if num is not None and num >= 0 else None
+
+
+def parse_pct_ou_none(valor: Any) -> int | None:
+    """Converte para percentual inteiro em 0..100 ou None."""
+    num = parse_int_ou_none(valor)
+    return num if num is not None and 0 <= num <= 100 else None
 
 
 def converter_data_hora_brt(iso_utc: str) -> tuple[str, str]:
     """Converte timestamp UTC da ESPN (ex.: '2026-11-20T00:30Z') para (YYYY-MM-DD, HH:MM) em BRT."""
     dt_utc = datetime.fromisoformat(iso_utc.replace("Z", "+00:00"))
+    if dt_utc.tzinfo is None:
+        dt_utc = dt_utc.replace(tzinfo=timezone.utc)
     dt_brt = dt_utc.astimezone(BRT)
     return dt_brt.strftime("%Y-%m-%d"), dt_brt.strftime("%H:%M")
 
@@ -388,7 +429,7 @@ def buscar_agenda_temporada(
         )
         if isinstance(fix.get("events"), list):
             eventos_futuros = fix["events"]
-    except requests.RequestException as exc:
+    except (requests.RequestException, ValueError) as exc:
         print(
             f"[AVISO] Não foi possível consultar fixtures futuros (usando apenas agenda principal): {exc}",
             file=sys.stderr,
@@ -396,17 +437,23 @@ def buscar_agenda_temporada(
 
     todos_por_id: dict[int, dict[str, Any]] = {}
     for ev in eventos_passados + eventos_futuros:
-        ev_id = int(ev["id"])
+        if not isinstance(ev, dict) or ev.get("id") is None:
+            continue
+        try:
+            ev_id = int(ev["id"])
+        except (ValueError, TypeError):
+            continue
         todos_por_id[ev_id] = ev
 
     mapa_rodadas: dict[int, int] = {}
     for idx, ev_id in enumerate(sorted(todos_por_id.keys()), start=1):
         ev = todos_por_id[ev_id]
         week = ev.get("week")
-        if isinstance(week, dict) and week.get("number"):
-            mapa_rodadas[ev_id] = int(week["number"])
-        elif isinstance(week, int):
-            mapa_rodadas[ev_id] = week
+        week_num = week.get("number") if isinstance(week, dict) else week
+        if isinstance(week_num, int) and not isinstance(week_num, bool) and week_num > 0:
+            mapa_rodadas[ev_id] = week_num
+        elif isinstance(week_num, str) and week_num.isdigit() and int(week_num) > 0:
+            mapa_rodadas[ev_id] = int(week_num)
         else:
             mapa_rodadas[ev_id] = idx
 
@@ -414,10 +461,11 @@ def buscar_agenda_temporada(
     concluidos: list[dict[str, Any]] = []
     for ev in todos_por_id.values():
         comps = ev.get("competitions") or []
-        if not comps:
+        if not comps or not isinstance(comps[0], dict):
             continue
-        status_type = comps[0].get("status", {}).get("type", {})
-        if status_type.get("completed") is True:
+        status_obj = comps[0].get("status")
+        status_type = status_obj.get("type") if isinstance(status_obj, dict) else None
+        if isinstance(status_type, dict) and status_type.get("completed") is True:
             concluidos.append(ev)
 
     concluidos.sort(key=lambda e: (str(e.get("date", "")), int(e["id"])))
@@ -450,18 +498,29 @@ def extrair_dados_basicos_evento(
     comp = ev["competitions"][0]
     competitors = comp.get("competitors", [])
 
-    sp_comp = next((c for c in competitors if str(c.get("team", {}).get("id")) == spfc_id), None)
-    adv_comp = next((c for c in competitors if str(c.get("team", {}).get("id")) != spfc_id), None)
+    sp_comp = next(
+        (c for c in competitors if isinstance(c, dict) and str((c.get("team") or {}).get("id")) == spfc_id),
+        None,
+    )
+    adv_comp = next(
+        (c for c in competitors if isinstance(c, dict) and str((c.get("team") or {}).get("id")) != spfc_id),
+        None,
+    )
     if not sp_comp or not adv_comp:
         raise ValueError(f"Competidores inválidos no evento {ev_id}.")
 
     mando = "Casa" if sp_comp.get("homeAway") == "home" else "Fora"
-    adv_team = adv_comp.get("team", {})
+    adv_team = adv_comp.get("team") or {}
     adversario = normalizar_nome_time(
         str(adv_team.get("displayName") or adv_team.get("name") or ""),
         adv_team.get("shortDisplayName"),
     )
     adversario_estado = ESTADOS_TIMES.get(adversario)
+    if adversario_estado is None:
+        print(
+            f"[AVISO] Clube '{adversario}' (evento {ev_id}) não possui UF mapeada em ESTADOS_TIMES.",
+            file=sys.stderr,
+        )
 
     gols_pro = extrair_placar_competitor(sp_comp)
     gols_contra = extrair_placar_competitor(adv_comp)
@@ -532,14 +591,16 @@ def extrair_gols_spfc(summary: dict[str, Any], spfc_id: str) -> list[dict[str, A
     """Extrai os gols a favor do SPFC no exato schema v1 a partir de `/summary`."""
     gols: list[dict[str, Any]] = []
 
-    hcomp = (summary.get("header", {}).get("competitions") or [{}])[0]
+    header = summary.get("header")
+    hcomps = (header.get("competitions") if isinstance(header, dict) else None) or []
+    hcomp = hcomps[0] if hcomps and isinstance(hcomps[0], dict) else {}
     details = hcomp.get("details") or []
 
     if details:
         for d in details:
-            if not d.get("scoringPlay"):
+            if not isinstance(d, dict) or not d.get("scoringPlay"):
                 continue
-            if str(d.get("team", {}).get("id")) != spfc_id:
+            if str((d.get("team") or {}).get("id")) != spfc_id:
                 continue
 
             eh_gol_contra = bool(d.get("ownGoal"))
@@ -552,17 +613,14 @@ def extrair_gols_spfc(summary: dict[str, Any], spfc_id: str) -> list[dict[str, A
                 tipo = "Normal"
 
             participantes = d.get("participants") or []
-            atleta_raw = (
-                participantes[0].get("athlete", {}).get("displayName")
-                if participantes
-                else ""
-            )
+            primeiro_part = participantes[0] if participantes and isinstance(participantes[0], dict) else {}
+            atleta_raw = (primeiro_part.get("athlete") or {}).get("displayName") or ""
             jogador = (
                 " ".join(str(atleta_raw or "").split())
                 if eh_gol_contra
                 else normalizar_atleta(atleta_raw)
             )
-            minuto = normalizar_minuto(d.get("clock", {}).get("displayValue"))
+            minuto = normalizar_minuto((d.get("clock") or {}).get("displayValue"))
 
             gols.append(
                 {
@@ -575,7 +633,7 @@ def extrair_gols_spfc(summary: dict[str, Any], spfc_id: str) -> list[dict[str, A
     else:
         # Fallback para keyEvents caso `header.competitions[0].details` esteja ausente
         for ke in summary.get("keyEvents") or []:
-            if not ke.get("scoringPlay"):
+            if not isinstance(ke, dict) or not ke.get("scoringPlay"):
                 continue
             if str((ke.get("team") or {}).get("id")) != spfc_id:
                 continue
@@ -591,17 +649,14 @@ def extrair_gols_spfc(summary: dict[str, Any], spfc_id: str) -> list[dict[str, A
                 tipo = "Normal"
 
             participantes = ke.get("participants") or []
-            atleta_raw = (
-                participantes[0].get("athlete", {}).get("displayName")
-                if participantes
-                else ""
-            )
+            primeiro_part = participantes[0] if participantes and isinstance(participantes[0], dict) else {}
+            atleta_raw = (primeiro_part.get("athlete") or {}).get("displayName") or ""
             jogador = (
                 " ".join(str(atleta_raw or "").split())
                 if eh_gol_contra
                 else normalizar_atleta(atleta_raw)
             )
-            minuto = normalizar_minuto(ke.get("clock", {}).get("displayValue"))
+            minuto = normalizar_minuto((ke.get("clock") or {}).get("displayValue"))
             gols.append(
                 {
                     "jogador": jogador,
@@ -629,12 +684,16 @@ def extrair_cartoes_e_stats(
     bs_sp: dict[str, str] = {}
     bs_adv: dict[str, str] = {}
 
-    for bt in summary.get("boxscore", {}).get("teams") or []:
-        tid = str(bt.get("team", {}).get("id") or "")
+    boxscore = summary.get("boxscore")
+    bs_teams = (boxscore.get("teams") if isinstance(boxscore, dict) else None) or []
+    for bt in bs_teams:
+        if not isinstance(bt, dict):
+            continue
+        tid = str((bt.get("team") or {}).get("id") or "")
         st_map = {
             str(s.get("name")): str(s.get("displayValue"))
             for s in (bt.get("statistics") or [])
-            if s.get("name")
+            if isinstance(s, dict) and s.get("name")
         }
         if tid == spfc_id:
             bs_sp = st_map
@@ -642,16 +701,18 @@ def extrair_cartoes_e_stats(
             bs_adv = st_map
 
     # Cartões via boxscore
-    bs_am_sp = parse_int_ou_none(bs_sp.get("yellowCards"))
-    bs_vm_sp = parse_int_ou_none(bs_sp.get("redCards"))
-    bs_am_adv = parse_int_ou_none(bs_adv.get("yellowCards"))
-    bs_vm_adv = parse_int_ou_none(bs_adv.get("redCards"))
+    bs_am_sp = parse_nonneg_int_ou_none(bs_sp.get("yellowCards"))
+    bs_vm_sp = parse_nonneg_int_ou_none(bs_sp.get("redCards"))
+    bs_am_adv = parse_nonneg_int_ou_none(bs_adv.get("yellowCards"))
+    bs_vm_adv = parse_nonneg_int_ou_none(bs_adv.get("redCards"))
 
     # Cartões via keyEvents (eventos cronológicos individuais)
     key_events = summary.get("keyEvents") or []
     if key_events:
         ke_am_sp = ke_vm_sp = ke_am_adv = ke_vm_adv = 0
         for ke in key_events:
+            if not isinstance(ke, dict):
+                continue
             tipo = str((ke.get("type") or {}).get("type") or "")
             ktid = str((ke.get("team") or {}).get("id") or "")
             if not ktid:
@@ -674,35 +735,42 @@ def extrair_cartoes_e_stats(
     else:
         am_sp, vm_sp, am_adv, vm_adv = bs_am_sp, bs_vm_sp, bs_am_adv, bs_vm_adv
 
-    # Formação tática do SPFC
+    # Formação tática do SPFC (validada contra padrão tático `N-N-...`)
     formacao_spfc: str | None = None
     for ros in summary.get("rosters") or []:
+        if not isinstance(ros, dict):
+            continue
         if str((ros.get("team") or {}).get("id")) == spfc_id:
             form = str(ros.get("formation") or "").strip()
-            if form:
+            if form and RE_FORMACAO_VALIDA.fullmatch(form):
                 formacao_spfc = form
             break
 
-    # Estatísticas técnicas do SPFC
-    chutes = parse_int_ou_none(bs_sp.get("totalShots"))
-    chutes_no_alvo = parse_int_ou_none(bs_sp.get("shotsOnTarget"))
-    posse_de_bola = parse_int_ou_none(bs_sp.get("possessionPct"))
-    passes = parse_int_ou_none(bs_sp.get("totalPasses"))
-    passes_certos = parse_int_ou_none(bs_sp.get("accuratePasses"))
+    # Estatísticas técnicas do SPFC (com validação de domínio coerente com o Quality Gate)
+    chutes = parse_nonneg_int_ou_none(bs_sp.get("totalShots"))
+    chutes_no_alvo = parse_nonneg_int_ou_none(bs_sp.get("shotsOnTarget"))
+    if chutes is not None and chutes_no_alvo is not None and chutes_no_alvo > chutes:
+        chutes_no_alvo = chutes
+
+    posse_de_bola = parse_pct_ou_none(bs_sp.get("possessionPct"))
+    passes = parse_nonneg_int_ou_none(bs_sp.get("totalPasses"))
+    passes_certos = parse_nonneg_int_ou_none(bs_sp.get("accuratePasses"))
 
     precisao_passes: int | None = None
     if passes and passes > 0 and passes_certos is not None:
-        precisao_passes = int(round((passes_certos / passes) * 100))
+        precisao_passes = max(0, min(100, int(round((passes_certos / passes) * 100))))
     elif bs_sp.get("passPct"):
         try:
-            raw_pct = float(bs_sp["passPct"])
-            precisao_passes = int(round(raw_pct * 100 if raw_pct <= 1.0 else raw_pct))
-        except ValueError:
+            raw_pct = float(str(bs_sp["passPct"]).replace(",", ".").rstrip("%").strip())
+            if math.isfinite(raw_pct):
+                pct_val = int(round(raw_pct * 100 if 0.0 <= raw_pct <= 1.0 else raw_pct))
+                precisao_passes = pct_val if 0 <= pct_val <= 100 else None
+        except (ValueError, TypeError, OverflowError):
             precisao_passes = None
 
-    faltas = parse_int_ou_none(bs_sp.get("foulsCommitted"))
-    escanteios = parse_int_ou_none(bs_sp.get("wonCorners"))
-    impedimentos = parse_int_ou_none(bs_sp.get("offsides"))
+    faltas = parse_nonneg_int_ou_none(bs_sp.get("foulsCommitted"))
+    escanteios = parse_nonneg_int_ou_none(bs_sp.get("wonCorners"))
+    impedimentos = parse_nonneg_int_ou_none(bs_sp.get("offsides"))
 
     return {
         "formacao_spfc": formacao_spfc,
@@ -729,20 +797,33 @@ def enriquecer_com_summary(
     """Consulta `/summary?event={id}` e completa gols, cartões, arena e estatísticas."""
     summary = get_json(sessao, "summary", params={"event": registro["id"]})
 
-    # Arena (prefere gameInfo.venue se mais completo)
-    venue = summary.get("gameInfo", {}).get("venue")
+    # Arena (prefere gameInfo.venue se mais completo; garante fallback obrigatório não-nulo)
+    game_info = summary.get("gameInfo")
+    venue = game_info.get("venue") if isinstance(game_info, dict) else None
     arena_summary = normalizar_arena(venue)
     if arena_summary:
         registro["arena"] = arena_summary
+    elif not registro.get("arena"):
+        registro["arena"] = (
+            ARENA_CASA_SPFC if registro.get("mando") == "Casa" else ARENA_FORA_FALLBACK
+        )
 
     gols_extraidos = extrair_gols_spfc(summary, spfc_id)
-    if len(gols_extraidos) == registro["gols_pro"]:
+    gols_validos = all(
+        bool(g.get("jogador")) and minuto_valido_v1(str(g.get("minuto") or ""))
+        for g in gols_extraidos
+    )
+    if len(gols_extraidos) == registro["gols_pro"] and gols_validos:
         registro["gols"] = gols_extraidos
     else:
+        motivo = (
+            f"retornou {len(gols_extraidos)} gol(s), divergindo de gols_pro={registro['gols_pro']}"
+            if len(gols_extraidos) != registro["gols_pro"]
+            else "retornou gols com jogador ou minuto inválido/ausente"
+        )
         print(
             f"[AVISO] /summary da ESPN para evento {registro['id']} "
-            f"(R{registro['rodada']} vs {registro['adversario']}) retornou "
-            f"{len(gols_extraidos)} gol(s), divergindo de gols_pro={registro['gols_pro']}. "
+            f"(R{registro['rodada']} vs {registro['adversario']}) {motivo}. "
             "Mantendo 'gols=None' para nova tentativa na próxima execução.",
             file=sys.stderr,
         )
@@ -876,9 +957,9 @@ def montar_metadata(
     temporada_inicio = min(p["temporada"] for p in partidas)
     temporada_fim = max(p["temporada"] for p in partidas)
 
-    sufixo_espn = f" e API pública ESPN ({TEMPORADA_PADRAO})" if temporada_fim >= TEMPORADA_PADRAO else ""
-    if temporada_fim > TEMPORADA_PADRAO:
-        sufixo_espn = f" e API pública ESPN ({TEMPORADA_PADRAO}–{temporada_fim})"
+    sufixo_espn = f" e API pública ESPN ({ANO_INICIO_ESPN})" if temporada_fim >= ANO_INICIO_ESPN else ""
+    if temporada_fim > ANO_INICIO_ESPN:
+        sufixo_espn = f" e API pública ESPN ({ANO_INICIO_ESPN}–{temporada_fim})"
 
     return {
         "clube": "São Paulo FC",
@@ -967,10 +1048,15 @@ def exibir_resumo(
                 f"{g['jogador']} {g['minuto']}'" + (" (P)" if g["tipo"] == "Pênalti" else (" (GC)" if g["gol_contra"] else ""))
                 for g in (p.get("gols") or [])
             ) or "—"
+            cartoes_txt = (
+                f"{p['cartoes_amarelos']}A {p['cartoes_vermelhos']}V"
+                if p.get("cartoes_amarelos") is not None and p.get("cartoes_vermelhos") is not None
+                else "—"
+            )
             print(
                 f"  R{p['rodada']:02d} | {p['data']} ({p['hora']}) | {p['mando']:4s} vs {p['adversario']:15s} | "
                 f"{p['gols_pro']}x{p['gols_contra']} ({p['resultado']}) | "
-                f"Cartões: {p['cartoes_amarelos']}A {p['cartoes_vermelhos']}V | Gols: {gols_txt}"
+                f"Cartões: {cartoes_txt} | Gols: {gols_txt}"
             )
     print(f"\nStatus de gravação:          {'Dataset atualizado' if houve_mudanca else 'Sem alterações nos jogos (cache mantido)'}")
     print("=" * 68)
@@ -1003,7 +1089,7 @@ def atualizar_temporada(temporada: int = TEMPORADA_PADRAO, forcar_refresh: bool 
             temp_p = int(p.get("temporada", 0))
             if temp_fim_hist < temp_p < temporada:
                 partidas_intermediarias.append(p)
-            elif not forcar_refresh and temp_p == temporada:
+            elif temp_p == temporada:
                 cache_temporada[int(p["id"])] = p
 
     base_anterior = partidas_historicas + partidas_intermediarias
@@ -1039,7 +1125,8 @@ def atualizar_temporada(temporada: int = TEMPORADA_PADRAO, forcar_refresh: bool 
 
         cached = cache_temporada.get(ev_id)
         if (
-            cached is not None
+            not forcar_refresh
+            and cached is not None
             and partida_tem_detalhes(cached)
             and cached.get("gols_pro") == registro["gols_pro"]
             and cached.get("gols_contra") == registro["gols_contra"]
@@ -1052,6 +1139,10 @@ def atualizar_temporada(temporada: int = TEMPORADA_PADRAO, forcar_refresh: bool 
             reaproveitado["mando"] = registro["mando"]
             reaproveitado["adversario"] = registro["adversario"]
             reaproveitado["adversario_estado"] = registro["adversario_estado"]
+            if not reaproveitado.get("arena"):
+                reaproveitado["arena"] = registro["arena"] or (
+                    ARENA_CASA_SPFC if registro["mando"] == "Casa" else ARENA_FORA_FALLBACK
+                )
             partidas_temporada.append(reaproveitado)
             qtd_cache += 1
         else:
@@ -1096,7 +1187,7 @@ def atualizar_temporada(temporada: int = TEMPORADA_PADRAO, forcar_refresh: bool 
 
     # 5. Gera docs/data/meta.json com data/hora da última execução em BRT e contagem de jogos
     meta_anterior = carregar_json_seguro(META_PATH)
-    ultima_partida_data = todas_partidas[-1]["data"] if todas_partidas else None
+    ultima_partida_data = max(str(p["data"]) for p in todas_partidas) if todas_partidas else None
     fonte_atualizacao = (
         "ESPN API (bra.1) + football-data.org (v4 / BSA)"
         if qtd_preservados_basicos > 0

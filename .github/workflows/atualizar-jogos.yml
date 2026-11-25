@@ -11,10 +11,13 @@ on:
         default: false
         type: boolean
 
+permissions: {}
+
 jobs:
   atualizar-dados:
     name: Carga incremental via API ESPN + Quality Gate
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     permissions:
       contents: write
@@ -43,8 +46,10 @@ jobs:
         run: python -m pip install --upgrade pip && pip install -r requirements.txt
 
       - name: Executar atualização incremental (ESPN)
+        env:
+          FORCE_REFRESH: ${{ inputs.force_refresh }}
         run: |
-          if [ "${{ inputs.force_refresh }}" = "true" ]; then
+          if [ "$FORCE_REFRESH" = "true" ]; then
             python etl/atualizar_temporada.py --force-refresh
           else
             python etl/atualizar_temporada.py
@@ -80,8 +85,12 @@ jobs:
             docs/data/spfc_pontos_corridos.json \
             docs/data/meta.json \
             docs/sitemap.xml
+          if git diff --cached --quiet; then
+            echo "Nenhuma diferença staged após git add. Encerrando sem commit."
+            exit 0
+          fi
           git commit -m "chore(data): atualiza jogos SPFC via ESPN"
-          git pull --rebase origin main
+          git pull --rebase --autostash origin main
           git push origin main
 
   build:
@@ -89,6 +98,7 @@ jobs:
     needs: atualizar-dados
     if: needs.atualizar-dados.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     permissions:
       contents: read
@@ -108,6 +118,9 @@ jobs:
       - name: Instalar esbuild
         run: npm install --no-audit --no-fund
 
+      - name: Validar testes unitários de frontend
+        run: npm test
+
       - name: Gerar build otimizado (minificação + cache-busting)
         run: npm run build
 
@@ -123,6 +136,7 @@ jobs:
     name: Deploy no GitHub Pages
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     permissions:
       pages: write

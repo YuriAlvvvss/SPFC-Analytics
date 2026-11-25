@@ -278,8 +278,12 @@ export function buildUrlFromState(state, bounds, locationLike) {
       : { pathname: "/", hash: "" });
   const params = buildSearchParamsFromState(state, bounds);
   const queryString = params.toString();
-  const pathname = loc.pathname || "/";
-  const hash = loc.hash || "";
+  const rawPathname = typeof loc.pathname === "string" && loc.pathname ? loc.pathname : "/";
+  const pathname = rawPathname.startsWith("//")
+    ? `/${rawPathname.replace(/^\/+/, "")}`
+    : rawPathname;
+  const rawHash = typeof loc.hash === "string" ? loc.hash : "";
+  const hash = rawHash.startsWith("#") ? rawHash : "";
   return `${pathname}${queryString ? `?${queryString}` : ""}${hash}`;
 }
 
@@ -1752,25 +1756,26 @@ export async function copyTextToClipboard(text) {
   const selection = document.getSelection();
   const previousRange = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
 
-  try {
-    textarea.focus({ preventScroll: true });
-  } catch {
-    textarea.focus();
-  }
-  textarea.select();
-  textarea.setSelectionRange(0, text.length);
-
   let copied = false;
   try {
+    try {
+      textarea.focus({ preventScroll: true });
+    } catch {
+      textarea.focus();
+    }
+    textarea.select();
+    textarea.setSelectionRange(0, text.length);
     copied = document.execCommand("copy");
   } catch {
     copied = false;
-  }
-
-  document.body.removeChild(textarea);
-  if (previousRange && selection) {
-    selection.removeAllRanges();
-    selection.addRange(previousRange);
+  } finally {
+    if (textarea.parentNode) {
+      textarea.parentNode.removeChild(textarea);
+    }
+    if (previousRange && selection) {
+      selection.removeAllRanges();
+      selection.addRange(previousRange);
+    }
   }
 
   return copied;
@@ -1830,6 +1835,9 @@ export function createShareLinkHandler({ dom, onBeforeCopy }) {
 export function bindFilterEvents({ dom, state, bounds, onFilterChange, onReset, onShare }) {
   dom["filter-season-start"].addEventListener("change", (e) => {
     const val = Number(e.target.value);
+    if (!Number.isFinite(val) || !(bounds.validSeasons instanceof Set) || !bounds.validSeasons.has(val)) {
+      return;
+    }
     state.seasonStart = val;
     if (state.seasonEnd < val) state.seasonEnd = val;
     state.tablePage = 1;
@@ -1838,6 +1846,9 @@ export function bindFilterEvents({ dom, state, bounds, onFilterChange, onReset, 
 
   dom["filter-season-end"].addEventListener("change", (e) => {
     const val = Number(e.target.value);
+    if (!Number.isFinite(val) || !(bounds.validSeasons instanceof Set) || !bounds.validSeasons.has(val)) {
+      return;
+    }
     state.seasonEnd = val;
     if (state.seasonStart > val) state.seasonStart = val;
     state.tablePage = 1;
@@ -1845,14 +1856,25 @@ export function bindFilterEvents({ dom, state, bounds, onFilterChange, onReset, 
   });
 
   dom["filter-opponent"].addEventListener("change", (e) => {
-    state.opponent = e.target.value;
+    const nextOpp = e.target.value;
+    if (
+      nextOpp !== "ALL" &&
+      nextOpp !== "CLASSICOS" &&
+      !(bounds.validOpponentClubs instanceof Map && bounds.validOpponentClubs.has(normalizeText(nextOpp)))
+    ) {
+      return;
+    }
+    state.opponent = nextOpp;
     state.tablePage = 1;
     onFilterChange();
   });
 
   document.querySelectorAll("[data-venue]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      state.venue = btn.dataset.venue;
+      const rawVenue = btn.dataset.venue;
+      const safeVenue = rawVenue === "ALL" ? "ALL" : VALID_VENUES.get(normalizeText(rawVenue));
+      if (!safeVenue) return;
+      state.venue = safeVenue;
       state.tablePage = 1;
       onFilterChange();
     });

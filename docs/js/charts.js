@@ -369,7 +369,9 @@ export function renderEvolutionChart({ dom, matches, state, onSelectSeason }) {
         maintainAspectRatio: false,
         onClick: onSeasonClick,
         onHover: (event, elements) => {
-          event.native.target.style.cursor = elements.length ? "pointer" : "default";
+          if (event?.native?.target) {
+            event.native.target.style.cursor = elements.length ? "pointer" : "default";
+          }
         },
         interaction: { mode: "index", intersect: false },
         plugins: {
@@ -443,7 +445,9 @@ export function renderEvolutionChart({ dom, matches, state, onSelectSeason }) {
         maintainAspectRatio: false,
         onClick: onSeasonClick,
         onHover: (event, elements) => {
-          event.native.target.style.cursor = elements.length ? "pointer" : "default";
+          if (event?.native?.target) {
+            event.native.target.style.cursor = elements.length ? "pointer" : "default";
+          }
         },
         interaction: { mode: "index", intersect: false },
         plugins: {
@@ -863,7 +867,9 @@ export function renderSecondaryChart({ dom, matches, state, bounds, onToggleOppo
         }
       },
       onHover(event, elements) {
-        event.native.target.style.cursor = elements.length ? "pointer" : "default";
+        if (event?.native?.target) {
+          event.native.target.style.cursor = elements.length ? "pointer" : "default";
+        }
       },
       plugins: {
         legend: { display: false },

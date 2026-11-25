@@ -7,6 +7,7 @@ import {
   paginateMatches,
   renderCardsCell,
   renderGoalsCell,
+  renderTable,
 } from "../../docs/js/table.js";
 
 const SAMPLE_MATCHES = [
@@ -117,5 +118,129 @@ describe("table.js — busca, ordenação, paginação e renderização segura",
     assert.match(goalsHtml, /\(GC\)/);
     assert.doesNotMatch(goalsHtml, /<script>/);
     assert.match(goalsHtml, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+
+    // Sanitização estrita de cartões malformados ou ausentes (anti-XSS)
+    const maliciousCards = renderCardsCell({
+      cartoes_amarelos: '<img src=x onerror="alert(1)">',
+      cartoes_vermelhos: 0,
+    });
+    assert.equal(maliciousCards, '<span class="muted-dash">—</span>');
+    assert.equal(renderCardsCell({}), '<span class="muted-dash">—</span>');
+  });
+
+  it("renderTable constrói o DOM sem innerHTML e neutraliza payloads XSS em data/adversário/arena/gols", () => {
+    const createMockNode = (tagName) => {
+      const node = {
+        tagName,
+        className: "",
+        title: "",
+        colSpan: 1,
+        attributes: {},
+        children: [],
+        _textContent: "",
+        get textContent() {
+          if (this.children.length === 0) return this._textContent;
+          return this.children.map((c) => (typeof c === "string" ? c : c.textContent)).join("");
+        },
+        set textContent(val) {
+          this._textContent = String(val ?? "");
+          this.children = [];
+        },
+        set innerHTML(_val) {
+          throw new Error("innerHTML não deve ser utilizado em renderTable!");
+        },
+        setAttribute(k, v) {
+          this.attributes[k] = String(v);
+        },
+        appendChild(child) {
+          if (child && child.isFragment) {
+            this.children.push(...child.children);
+          } else {
+            this.children.push(child);
+          }
+          return child;
+        },
+        replaceChildren(...nodes) {
+          this.children = [];
+          for (const n of nodes) {
+            this.appendChild(n);
+          }
+        },
+      };
+      return node;
+    };
+
+    const prevDocument = globalThis.document;
+    globalThis.document = {
+      createElement: (tag) => createMockNode(tag),
+      createTextNode: (text) => String(text ?? ""),
+      createDocumentFragment: () => ({
+        isFragment: true,
+        children: [],
+        appendChild(child) {
+          if (child && child.isFragment) this.children.push(...child.children);
+          else this.children.push(child);
+          return child;
+        },
+      }),
+      querySelectorAll: () => [],
+    };
+
+    try {
+      const tbody = createMockNode("tbody");
+      const dom = {
+        "table-total-badge": { textContent: "" },
+        "matches-tbody": tbody,
+        "pagination-info": { textContent: "" },
+        "page-indicator": { textContent: "" },
+        "btn-prev-page": { disabled: false },
+        "btn-next-page": { disabled: false },
+      };
+
+      const xssMatch = {
+        id: 999,
+        temporada: 2026,
+        rodada: 1,
+        data: '<img src=x onerror="alert(1)">',
+        mando: 'Casa"><script>alert(2)</script>',
+        adversario: "<svg onload=alert(3)>",
+        adversario_estado: 'SP" onclick="alert(4)',
+        arena: "<b>Estádio</b>",
+        tecnico_spfc: "<script>alert(5)</script>",
+        gols_pro: 1,
+        gols_contra: 0,
+        saldo_gols: 1,
+        resultado: 'V"><script>alert(6)</script>',
+        cartoes_amarelos: 2,
+        cartoes_vermelhos: 0,
+        gols: [{ jogador: "<img src=x onerror=alert(7)>", minuto: "10'<b>", tipo: "Normal", gol_contra: false }],
+      };
+
+      renderTable({
+        dom,
+        filteredMatches: [xssMatch],
+        state: {
+          tableSearch: "",
+          tableResult: "ALL",
+          tableSortBy: "data",
+          tableSortDir: "desc",
+          tablePage: 1,
+          tablePageSize: 25,
+        },
+        modernStart: 2014,
+      });
+
+      assert.equal(tbody.children.length, 1);
+      const row = tbody.children[0];
+      assert.equal(row.tagName, "tr");
+      // Data maliciosa permanece texto literal via textContent, sem parsing HTML
+      assert.equal(row.children[0].textContent, '<img src=x onerror="alert(1)">');
+      // Resultado inválido sanitizado para fallback seguro na classe CSS
+      const resultBadge = row.children[4].children[0].children[1];
+      assert.equal(resultBadge.className, "result-badge result-badge--E");
+      assert.equal(resultBadge.textContent, "E");
+    } finally {
+      globalThis.document = prevDocument;
+    }
   });
 });

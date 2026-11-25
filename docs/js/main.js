@@ -211,6 +211,17 @@ function cacheDom() {
 // Renderização dos KPIs
 // =========================================================================
 
+function clampPercent(value) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.min(100, Math.max(0, value))
+    : 0;
+}
+
+const VALID_RECORD_TONES = new Set(["positive", "negative", "neutral", "empty"]);
+const VALID_COUNTDOWN_TONES = new Set(["today", "tomorrow", "upcoming", "past", "live"]);
+const VALID_EVOLUTION_MODES = new Set(["performance", "goals"]);
+const VALID_SECONDARY_TABS = new Set(["discipline", "opponents"]);
+
 function renderKPIs(matches) {
   const s = computeSummary(matches);
 
@@ -230,7 +241,7 @@ function renderKPIs(matches) {
   // Card 2: Aproveitamento
   dom["kpi-winrate"].textContent = formatPct(s.winrate);
   dom["kpi-points-tag"].textContent = `${fmtInt.format(s.points)} pts`;
-  dom["kpi-winrate-bar"].style.width = `${s.winrate !== null ? Math.min(100, Math.max(0, s.winrate)) : 0}%`;
+  dom["kpi-winrate-bar"].style.width = `${clampPercent(s.winrate)}%`;
   dom["kpi-points-detail"].textContent =
     s.games > 0
       ? `${fmtInt.format(s.points)} de ${fmtInt.format(s.maxPoints)} pontos possíveis`
@@ -240,9 +251,9 @@ function renderKPIs(matches) {
   dom["kpi-wins"].textContent = fmtInt.format(s.wins);
   dom["kpi-draws"].textContent = fmtInt.format(s.draws);
   dom["kpi-losses"].textContent = fmtInt.format(s.losses);
-  dom["kpi-bar-win"].style.width = `${s.winPct ?? 0}%`;
-  dom["kpi-bar-draw"].style.width = `${s.drawPct ?? 0}%`;
-  dom["kpi-bar-loss"].style.width = `${s.lossPct ?? 0}%`;
+  dom["kpi-bar-win"].style.width = `${clampPercent(s.winPct)}%`;
+  dom["kpi-bar-draw"].style.width = `${clampPercent(s.drawPct)}%`;
+  dom["kpi-bar-loss"].style.width = `${clampPercent(s.lossPct)}%`;
   dom["kpi-ved-pct"].textContent =
     s.games > 0
       ? `${formatPct(s.winPct)} V · ${formatPct(s.drawPct)} E · ${formatPct(s.lossPct)} D`
@@ -302,8 +313,12 @@ const RECORD_ICON_PATHS = {
 
 function createRecordIcon(iconKey, toneClass) {
   const svgNs = "http://www.w3.org/2000/svg";
+  const safeTone =
+    toneClass === "positive" || toneClass === "negative" || toneClass === "neutral"
+      ? toneClass
+      : "";
   const wrap = document.createElement("span");
-  wrap.className = `record-icon${toneClass ? ` record-icon--${toneClass}` : ""}`;
+  wrap.className = `record-icon${safeTone ? ` record-icon--${safeTone}` : ""}`;
   wrap.setAttribute("aria-hidden", "true");
 
   const svg = document.createElementNS(svgNs, "svg");
@@ -317,7 +332,10 @@ function createRecordIcon(iconKey, toneClass) {
   svg.setAttribute("stroke-linejoin", "round");
 
   const path = document.createElementNS(svgNs, "path");
-  path.setAttribute("d", RECORD_ICON_PATHS[iconKey] || RECORD_ICON_PATHS.pulse);
+  const pathData = Object.hasOwn(RECORD_ICON_PATHS, iconKey)
+    ? RECORD_ICON_PATHS[iconKey]
+    : RECORD_ICON_PATHS.pulse;
+  path.setAttribute("d", pathData);
   svg.appendChild(path);
   wrap.appendChild(svg);
   return wrap;
@@ -336,15 +354,16 @@ function createRecordCard({
   metaSuffix = "",
   tieCount = 0,
 }) {
+  const safeTone = VALID_RECORD_TONES.has(tone) ? tone : "neutral";
   const card = document.createElement("article");
-  card.className = `record-card record-card--${tone}`;
+  card.className = `record-card record-card--${safeTone}`;
 
   const head = document.createElement("div");
   head.className = "record-card-head";
 
   const titleWrap = document.createElement("div");
   titleWrap.className = "record-title-wrap";
-  const iconTone = tone === "empty" ? "" : tone;
+  const iconTone = safeTone === "empty" ? "" : safeTone;
   titleWrap.appendChild(createRecordIcon(icon, iconTone));
 
   const titleEl = document.createElement("span");
@@ -356,8 +375,8 @@ function createRecordCard({
   if (badgeText) {
     const badgeEl = document.createElement("span");
     const badgeToneClass =
-      tone === "positive" || tone === "negative" || tone === "neutral"
-        ? ` record-badge--${tone}`
+      safeTone === "positive" || safeTone === "negative" || safeTone === "neutral"
+        ? ` record-badge--${safeTone}`
         : "";
     badgeEl.className = `record-badge${badgeToneClass}`;
     badgeEl.textContent = badgeText;
@@ -943,7 +962,7 @@ function createNextMatchSvgIcon(iconName) {
     ],
   };
 
-  const paths = pathsByIcon[iconName] || [];
+  const paths = Object.hasOwn(pathsByIcon, iconName) ? pathsByIcon[iconName] : [];
   for (const d of paths) {
     const path = document.createElementNS(svgNs, "path");
     path.setAttribute("d", d);
@@ -964,7 +983,8 @@ function applyNextMatchTemporalState(seloTemporal, elements) {
   const { badgeEl, noteEl } = elements;
 
   if (badgeEl) {
-    const nextClassName = `next-match-countdown next-match-countdown--${seloTemporal.tom}`;
+    const safeTone = VALID_COUNTDOWN_TONES.has(seloTemporal.tom) ? seloTemporal.tom : "upcoming";
+    const nextClassName = `next-match-countdown next-match-countdown--${safeTone}`;
     if (badgeEl.className !== nextClassName) {
       badgeEl.className = nextClassName;
     }
@@ -1452,7 +1472,9 @@ function bindEvents() {
 
   document.querySelectorAll("[data-evolution-mode]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      state.evolutionMode = btn.dataset.evolutionMode;
+      const nextMode = btn.dataset.evolutionMode;
+      if (!VALID_EVOLUTION_MODES.has(nextMode)) return;
+      state.evolutionMode = nextMode;
       document.querySelectorAll("[data-evolution-mode]").forEach((b) => {
         const active = b === btn;
         b.classList.toggle("is-active", active);
@@ -1469,7 +1491,9 @@ function bindEvents() {
 
   document.querySelectorAll("[data-secondary-tab]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      state.secondaryTab = btn.dataset.secondaryTab;
+      const nextTab = btn.dataset.secondaryTab;
+      if (!VALID_SECONDARY_TABS.has(nextTab)) return;
+      state.secondaryTab = nextTab;
       document.querySelectorAll("[data-secondary-tab]").forEach((b) => {
         const active = b === btn;
         b.classList.toggle("is-active", active);
@@ -1599,7 +1623,11 @@ export async function init() {
       typeof window !== "undefined" && window.location.protocol === "file:"
         ? " Abra via servidor HTTP local (ex.: python -m http.server -d docs 8000) ou pelo GitHub Pages."
         : "";
-    dom["state-error-message"].textContent = `${error.message}.${extraHint}`;
+    const errorMessage =
+      error && typeof error.message === "string" && error.message.trim()
+        ? error.message.trim()
+        : "Erro inesperado ao carregar a base de partidas";
+    dom["state-error-message"].textContent = `${errorMessage}.${extraHint}`;
   }
 }
 

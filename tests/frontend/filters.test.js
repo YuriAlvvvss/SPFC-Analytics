@@ -414,9 +414,13 @@ describe("filters.js — deep-linking bidirecional e parsing de query string", (
   it("serializa apenas filtros não-padrão e mantém ida-e-volta consistente (round-trip)", () => {
     const state = createFilterState(bounds);
 
-    // Estado padrão gera URL limpa sem "?"
+    // Estado padrão gera URL limpa sem "?" e neutraliza pathname protocol-relative ("//...")
     assert.equal(buildSearchParamsFromState(state, bounds).toString(), "");
     assert.equal(buildUrlFromState(state, bounds, { pathname: "/index.html", hash: "#top" }), "/index.html#top");
+    assert.equal(
+      buildUrlFromState(state, bounds, { pathname: "//evil.example/path", hash: "invalid-hash" }),
+      "/evil.example/path"
+    );
 
     // Aplica filtros específicos e verifica serialização e round-trip
     state.seasonStart = 2006;

@@ -4,7 +4,27 @@
  * e renderização segura da tabela de partidas filtradas.
  */
 
-import { escapeHtml, fmtInt, formatDateBR, normalizeText } from "./data.js";
+import { VALID_RESULTS, escapeHtml, fmtInt, formatDateBR, normalizeText } from "./data.js";
+
+const VALID_SORT_COLUMNS = new Set(["data", "temporada", "adversario", "saldo_gols"]);
+const VALID_TABLE_RESULTS = new Set(["ALL", "V", "E", "D"]);
+
+function isFiniteCardCount(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function getMissingGoalsLabel(match, modernStart) {
+  return typeof match?.temporada === "number" && Number.isFinite(match.temporada) && match.temporada < modernStart
+    ? "Sem registro (03–13)"
+    : "Sem registro";
+}
+
+function createTextSpan(className, text) {
+  const el = document.createElement("span");
+  if (className) el.className = className;
+  el.textContent = text;
+  return el;
+}
 
 /**
  * Filtra por resultado (V/E/D) e busca textual, e ordena as partidas conforme o estado da tabela.
@@ -77,40 +97,176 @@ export function paginateMatches(list, requestedPage = 1, pageSize = 25) {
 }
 
 export function renderGoalsCell(match, modernStart = 2014) {
-  if (match.gols === null) {
-    const label =
-      typeof match.temporada === "number" && match.temporada < modernStart
-        ? "Sem registro (03–13)"
-        : "Sem registro";
+  if (!match || !Array.isArray(match.gols)) {
+    const label = getMissingGoalsLabel(match, modernStart);
     return `<span class="muted-dash">${escapeHtml(label)}</span>`;
   }
   if (match.gols.length === 0) {
     return '<span class="muted-dash">—</span>';
   }
-  const chips = match.gols.map((g) => {
-    const minute = g.minuto ? `<span class="goal-minute">${escapeHtml(g.minuto)}'</span>` : "";
-    let tag = "";
-    if (g.tipo === "Pênalti") tag = '<span class="goal-tag">(P)</span>';
-    else if (g.gol_contra) tag = '<span class="goal-tag">(GC)</span>';
+  const chips = match.gols
+    .filter((g) => g && typeof g === "object")
+    .map((g) => {
+      const minute = g.minuto ? `<span class="goal-minute">${escapeHtml(g.minuto)}'</span>` : "";
+      let tag = "";
+      if (g.tipo === "Pênalti") tag = '<span class="goal-tag">(P)</span>';
+      else if (g.gol_contra) tag = '<span class="goal-tag">(GC)</span>';
 
-    const ownClass = g.gol_contra ? " goal-chip--own" : "";
-    return `<span class="goal-chip${ownClass}">${escapeHtml(g.jogador)} ${minute}${tag}</span>`;
-  });
+      const ownClass = g.gol_contra ? " goal-chip--own" : "";
+      return `<span class="goal-chip${ownClass}">${escapeHtml(g.jogador ?? "")} ${minute}${tag}</span>`;
+    });
+  if (chips.length === 0) {
+    return '<span class="muted-dash">—</span>';
+  }
   return `<div class="goals-list">${chips.join("")}</div>`;
 }
 
 export function renderCardsCell(match) {
-  if (match.cartoes_amarelos === null || match.cartoes_vermelhos === null) {
+  if (!match || !isFiniteCardCount(match.cartoes_amarelos) || !isFiniteCardCount(match.cartoes_vermelhos)) {
     return '<span class="muted-dash">—</span>';
   }
+  const yellow = escapeHtml(String(match.cartoes_amarelos));
+  const red = escapeHtml(String(match.cartoes_vermelhos));
   return `
     <span class="card-count" title="Cartões amarelos do SPFC">
-      <span class="mini-card mini-card--yellow" aria-hidden="true"></span>${match.cartoes_amarelos}
+      <span class="mini-card mini-card--yellow" aria-hidden="true"></span>${yellow}
     </span>
     <span class="card-count" title="Cartões vermelhos do SPFC">
-      <span class="mini-card mini-card--red" aria-hidden="true"></span>${match.cartoes_vermelhos}
+      <span class="mini-card mini-card--red" aria-hidden="true"></span>${red}
     </span>
   `;
+}
+
+function buildGoalsCellContent(match, modernStart = 2014) {
+  if (!match || !Array.isArray(match.gols)) {
+    return createTextSpan("muted-dash", getMissingGoalsLabel(match, modernStart));
+  }
+  const validGoals = match.gols.filter((g) => g && typeof g === "object");
+  if (validGoals.length === 0) {
+    return createTextSpan("muted-dash", "—");
+  }
+
+  const list = document.createElement("div");
+  list.className = "goals-list";
+
+  for (const g of validGoals) {
+    const chip = document.createElement("span");
+    chip.className = g.gol_contra ? "goal-chip goal-chip--own" : "goal-chip";
+
+    const playerName = typeof g.jogador === "string" ? g.jogador : String(g.jogador ?? "");
+    chip.appendChild(document.createTextNode(g.minuto || g.tipo === "Pênalti" || g.gol_contra ? `${playerName} ` : playerName));
+
+    if (g.minuto) {
+      chip.appendChild(createTextSpan("goal-minute", `${String(g.minuto)}'`));
+    }
+    if (g.tipo === "Pênalti") {
+      chip.appendChild(createTextSpan("goal-tag", "(P)"));
+    } else if (g.gol_contra) {
+      chip.appendChild(createTextSpan("goal-tag", "(GC)"));
+    }
+
+    list.appendChild(chip);
+  }
+
+  return list;
+}
+
+function buildCardsCellContent(match) {
+  const frag = document.createDocumentFragment();
+  if (!match || !isFiniteCardCount(match.cartoes_amarelos) || !isFiniteCardCount(match.cartoes_vermelhos)) {
+    frag.appendChild(createTextSpan("muted-dash", "—"));
+    return frag;
+  }
+
+  const yellowWrap = document.createElement("span");
+  yellowWrap.className = "card-count";
+  yellowWrap.title = "Cartões amarelos do SPFC";
+  const yellowIcon = document.createElement("span");
+  yellowIcon.className = "mini-card mini-card--yellow";
+  yellowIcon.setAttribute("aria-hidden", "true");
+  yellowWrap.appendChild(yellowIcon);
+  yellowWrap.appendChild(document.createTextNode(String(match.cartoes_amarelos)));
+
+  const redWrap = document.createElement("span");
+  redWrap.className = "card-count";
+  redWrap.title = "Cartões vermelhos do SPFC";
+  const redIcon = document.createElement("span");
+  redIcon.className = "mini-card mini-card--red";
+  redIcon.setAttribute("aria-hidden", "true");
+  redWrap.appendChild(redIcon);
+  redWrap.appendChild(document.createTextNode(String(match.cartoes_vermelhos)));
+
+  frag.appendChild(yellowWrap);
+  frag.appendChild(redWrap);
+  return frag;
+}
+
+function buildMatchRowElement(m, modernStart = 2014) {
+  const tr = document.createElement("tr");
+
+  // 1. Data
+  const tdDate = document.createElement("td");
+  tdDate.className = "cell-date";
+  tdDate.textContent = formatDateBR(m?.data);
+  tr.appendChild(tdDate);
+
+  // 2. Temporada / Rodada
+  const tdSeason = document.createElement("td");
+  tdSeason.className = "cell-season";
+  const seasonLabel = Number.isFinite(m?.temporada) ? String(m.temporada) : "—";
+  const roundLabel = Number.isFinite(m?.rodada) ? String(m.rodada).padStart(2, "0") : "00";
+  tdSeason.textContent = `${seasonLabel} · R${roundLabel}`;
+  tr.appendChild(tdSeason);
+
+  // 3. Mando
+  const tdVenue = document.createElement("td");
+  const venueClass = m?.mando === "Casa" ? "venue-pill--home" : "venue-pill--away";
+  tdVenue.appendChild(createTextSpan(`venue-pill ${venueClass}`, String(m?.mando || "—")));
+  tr.appendChild(tdVenue);
+
+  // 4. Adversário + UF
+  const tdOpp = document.createElement("td");
+  tdOpp.className = "opponent-cell";
+  tdOpp.appendChild(document.createTextNode(String(m?.adversario || "—")));
+  if (m?.adversario_estado) {
+    tdOpp.appendChild(createTextSpan("opponent-uf", String(m.adversario_estado)));
+  }
+  tr.appendChild(tdOpp);
+
+  // 5. Placar + Selo de Resultado
+  const tdScore = document.createElement("td");
+  const scoreCell = document.createElement("span");
+  scoreCell.className = "score-cell";
+  const gp = Number.isFinite(m?.gols_pro) ? String(m.gols_pro) : "—";
+  const gc = Number.isFinite(m?.gols_contra) ? String(m.gols_contra) : "—";
+  scoreCell.appendChild(createTextSpan("score-text", `${gp} × ${gc}`));
+
+  const safeResult = VALID_RESULTS.has(m?.resultado) ? m.resultado : "E";
+  scoreCell.appendChild(createTextSpan(`result-badge result-badge--${safeResult}`, safeResult));
+  tdScore.appendChild(scoreCell);
+  tr.appendChild(tdScore);
+
+  // 6. Gols do SPFC
+  const tdGoals = document.createElement("td");
+  tdGoals.appendChild(buildGoalsCellContent(m, modernStart));
+  tr.appendChild(tdGoals);
+
+  // 7. Cartões
+  const tdCards = document.createElement("td");
+  tdCards.className = "cards-cell";
+  tdCards.appendChild(buildCardsCellContent(m));
+  tr.appendChild(tdCards);
+
+  // 8. Estádio / Técnico
+  const tdArena = document.createElement("td");
+  tdArena.className = "arena-cell";
+  tdArena.appendChild(createTextSpan("arena-name", String(m?.arena || "—")));
+  if (m?.tecnico_spfc) {
+    tdArena.appendChild(createTextSpan("coach-name", `Téc.: ${String(m.tecnico_spfc)}`));
+  }
+  tr.appendChild(tdArena);
+
+  return tr;
 }
 
 export function renderTable({ dom, filteredMatches, state, modernStart = 2014 }) {
@@ -124,48 +280,23 @@ export function renderTable({ dom, filteredMatches, state, modernStart = 2014 })
   state.tablePage = page;
   dom["table-total-badge"].textContent = fmtInt.format(total);
 
-  if (pageRows.length === 0) {
-    dom["matches-tbody"].innerHTML = `
-      <tr class="table-empty-row">
-        <td colspan="8">
-          Nenhuma partida encontrada para os filtros e busca informados.
-        </td>
-      </tr>
-    `;
-  } else {
-    dom["matches-tbody"].innerHTML = pageRows
-      .map((m) => {
-        const venueClass = m.mando === "Casa" ? "venue-pill--home" : "venue-pill--away";
-        const ufTag = m.adversario_estado
-          ? `<span class="opponent-uf">${escapeHtml(m.adversario_estado)}</span>`
-          : "";
-        const coachHtml = m.tecnico_spfc
-          ? `<span class="coach-name">Téc.: ${escapeHtml(m.tecnico_spfc)}</span>`
-          : "";
+  const tbody = dom["matches-tbody"];
+  const fragment = document.createDocumentFragment();
 
-        return `
-          <tr>
-            <td class="cell-date">${formatDateBR(m.data)}</td>
-            <td class="cell-season">${m.temporada} · R${String(m.rodada).padStart(2, "0")}</td>
-            <td><span class="venue-pill ${venueClass}">${escapeHtml(m.mando)}</span></td>
-            <td class="opponent-cell">${escapeHtml(m.adversario)}${ufTag}</td>
-            <td>
-              <span class="score-cell">
-                <span class="score-text">${m.gols_pro} × ${m.gols_contra}</span>
-                <span class="result-badge result-badge--${m.resultado}">${m.resultado}</span>
-              </span>
-            </td>
-            <td>${renderGoalsCell(m, modernStart)}</td>
-            <td class="cards-cell">${renderCardsCell(m)}</td>
-            <td class="arena-cell">
-              <span class="arena-name">${escapeHtml(m.arena || "—")}</span>
-              ${coachHtml}
-            </td>
-          </tr>
-        `;
-      })
-      .join("");
+  if (pageRows.length === 0) {
+    const emptyRow = document.createElement("tr");
+    emptyRow.className = "table-empty-row";
+    const emptyCell = document.createElement("td");
+    emptyCell.colSpan = 8;
+    emptyCell.textContent = "Nenhuma partida encontrada para os filtros e busca informados.";
+    emptyRow.appendChild(emptyCell);
+    fragment.appendChild(emptyRow);
+  } else {
+    for (const m of pageRows) {
+      fragment.appendChild(buildMatchRowElement(m, modernStart));
+    }
   }
+  tbody.replaceChildren(fragment);
 
   // Paginação
   dom["pagination-info"].textContent =
@@ -199,7 +330,9 @@ export function bindTableEvents({ dom, state, onTableFilterChange, onTableViewCh
 
   document.querySelectorAll("[data-result]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      state.tableResult = btn.dataset.result;
+      const nextResult = btn.dataset.result;
+      if (!VALID_TABLE_RESULTS.has(nextResult)) return;
+      state.tableResult = nextResult;
       state.tablePage = 1;
       onTableFilterChange({ skipInputSync: false });
     });
@@ -208,6 +341,7 @@ export function bindTableEvents({ dom, state, onTableFilterChange, onTableViewCh
   document.querySelectorAll(".sort-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const col = btn.dataset.sort;
+      if (!VALID_SORT_COLUMNS.has(col)) return;
       if (state.tableSortBy === col) {
         state.tableSortDir = state.tableSortDir === "asc" ? "desc" : "asc";
       } else {
