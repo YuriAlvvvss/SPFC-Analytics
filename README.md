@@ -204,16 +204,25 @@ SPFC-Analytics/
 │   │   ├── meta.json                    # Metadados da última sincronização (BRT) e contagens
 │   │   ├── proximo_jogo.json            # Agenda do próximo jogo do SPFC (consumido pelo Card de Próximo Jogo)
 │   │   └── spfc_pontos_corridos.json    # Dataset de produção (2003–Atual) consumido pelo site
-│   ├── index.html                       # Página principal do painel
+│   ├── index.html                       # Página principal do painel (Chart.js 4.4.7 com SRI + ES Modules)
 │   └── js/
-│       └── app.js                       # Próximo jogo, filtros/URL, streaks, comparador, Chart.js 4 e tabela
+│       ├── data.js                      # Carregamento, normalização, formatadores e cache em memória dos JSONs
+│       ├── filters.js                   # Estado de filtros, pílulas, deep-linking URL e agregações puras
+│       ├── charts.js                    # Configuração, ciclo de vida e renderização das instâncias Chart.js 4
+│       ├── table.js                     # Busca, ordenação, paginação e renderização da tabela de partidas
+│       └── main.js                      # Bootstrap da aplicação e coordenação entre módulos
 ├── etl/
 │   ├── atualizar_jogos_api.py           # Ingestão incremental via football-data.org v4 + proximo_jogo.json
 │   ├── atualizar_temporada.py           # Carga incremental complementar via API ESPN (gols, cartões e stats)
 │   └── processar_dados.py               # ETL histórico (Kaggle CSVs), patch de datas e merge determinístico
 ├── tests/
+│   ├── frontend/
+│   │   ├── data.test.js                 # Testes unitários (node:test) de normalização e cache (data.js)
+│   │   ├── filters.test.js              # Testes unitários (node:test) de filtros, KPIs e deep-linking (filters.js)
+│   │   └── table.test.js                # Testes unitários (node:test) de busca, ordenação e paginação (table.js)
 │   └── test_data_quality.py             # Suíte pytest de qualidade, integridade e testes offline do pipeline
 ├── .gitignore
+├── package.json                         # Metadados ESM (`"type": "module"`) e script `npm test` (zero dependências)
 ├── README.md
 └── requirements.txt                     # Dependências Python (requests e pytest)
 ```

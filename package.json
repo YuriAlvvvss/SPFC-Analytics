@@ -1,0 +1,13 @@
+{
+  "name": "dados-tricolor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Painel estático Dados Tricolor (SPFC-Analytics) — ES Modules e testes unitários de frontend",
+  "type": "module",
+  "scripts": {
+    "test": "node --test \"tests/frontend/*.test.js\""
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

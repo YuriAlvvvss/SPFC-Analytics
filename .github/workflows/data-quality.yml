@@ -33,9 +33,25 @@ jobs:
       - name: Executar suíte de qualidade de dados
         run: pytest -v
 
+  frontend-tests:
+    name: Testes unitários de frontend (node:test)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Executar testes unitários de frontend
+        run: node --test "tests/frontend/*.test.js"
+
   build:
     name: Preparar artefato do GitHub Pages
-    needs: data-quality
+    needs: [data-quality, frontend-tests]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
 
