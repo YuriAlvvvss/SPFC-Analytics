@@ -43,6 +43,11 @@
   --shadow-md: 0 8px 24px rgba(17, 19, 21, 0.08);
   --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --font-display: "Barlow Condensed", "Inter", sans-serif;
+
+  /* Camadas e offset da barra de filtros sticky */
+  --z-content: 1;
+  --z-sticky-filters: 100;
+  --sticky-filters-offset: 20px;
 }
 
 *,
@@ -659,20 +664,28 @@ a:focus-visible {
   padding-block: 14px;
   background-color: var(--bg-page);
   border-bottom: 1px solid transparent;
+  scroll-margin-top: 0;
   transition: box-shadow 0.2s ease, border-color 0.2s ease;
 }
 
 /* Sticky ativado estritamente em telas desktop suficientemente altas */
 @media (min-width: 1024px) and (min-height: 680px) {
+  :root {
+    --sticky-filters-offset: 212px;
+  }
+
   .filters-wrapper {
     position: sticky;
     top: 0;
-    z-index: 40;
-    background-color: rgba(245, 246, 248, 0.92);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
-    border-bottom-color: var(--border);
-    padding-block: 10px;
+    z-index: var(--z-sticky-filters);
+    background-color: var(--bg-page);
+    border-bottom: 1px solid var(--border-strong);
+    box-shadow: 0 6px 18px rgba(17, 19, 21, 0.08), 0 1px 2px rgba(17, 19, 21, 0.04);
+    padding-block: 10px 12px;
+  }
+
+  .filters-panel {
+    box-shadow: var(--shadow-xs);
   }
 }
 
@@ -949,8 +962,22 @@ a:focus-visible {
    ========================================================================== */
 
 .main-content {
+  position: relative;
+  z-index: var(--z-content);
   flex: 1;
-  padding-block: 16px 40px;
+  padding-block: 20px 44px;
+}
+
+/* Garante folga segura abaixo da barra sticky ao navegar por âncoras ou foco */
+.main-content section,
+.main-content [id],
+.kpi-grid,
+.records-section,
+.charts-grid,
+.chart-card,
+.comparator-section,
+.table-card {
+  scroll-margin-top: var(--sticky-filters-offset);
 }
 
 .status-banner {
@@ -1061,7 +1088,7 @@ a:focus-visible {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 14px;
-  margin-bottom: 20px;
+  margin-bottom: 24px;
 }
 
 @media (min-width: 560px) {
@@ -1316,7 +1343,8 @@ a:focus-visible {
    ========================================================================== */
 
 .records-section {
-  margin-bottom: 22px;
+  padding-top: 4px;
+  margin-bottom: 26px;
 }
 
 .records-section-header {
@@ -1565,7 +1593,8 @@ a:focus-visible {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 18px;
-  margin-bottom: 22px;
+  padding-top: 4px;
+  margin-bottom: 26px;
 }
 
 @media (min-width: 960px) {
@@ -1780,7 +1809,8 @@ a:focus-visible {
    ========================================================================== */
 
 .comparator-section {
-  margin-bottom: 22px;
+  padding-top: 4px;
+  margin-bottom: 26px;
 }
 
 .comparator-section-header {
@@ -2416,6 +2446,7 @@ a:focus-visible {
    ========================================================================== */
 
 .table-card {
+  margin-top: 4px;
   background-color: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -2453,13 +2484,18 @@ a:focus-visible {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 10px;
+  max-width: 100%;
 }
 
 .search-box {
   position: relative;
   display: flex;
   align-items: center;
+  flex: 1 1 320px;
+  min-width: min(100%, 316px);
+  max-width: 360px;
 }
 
 .search-box svg {
@@ -2471,7 +2507,8 @@ a:focus-visible {
 
 .search-input {
   height: 36px;
-  width: 260px;
+  width: 100%;
+  min-width: 0;
   max-width: 100%;
   padding: 0 12px 0 34px;
   border: 1px solid var(--border-strong);
@@ -2481,10 +2518,42 @@ a:focus-visible {
   font-size: 0.84rem;
 }
 
+.search-input::placeholder {
+  color: var(--ink-muted);
+}
+
 @media (max-width: 600px) {
-  .search-box,
+  .table-header {
+    padding: 14px 14px 12px;
+  }
+
+  .table-toolbar {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .search-box {
+    flex: 1 1 100%;
+    min-width: 0;
+    max-width: 100%;
+    width: 100%;
+  }
+
   .search-input {
     width: 100%;
+    padding: 0 10px 0 32px;
+    font-size: 0.8rem;
+  }
+}
+
+@media (max-width: 380px) {
+  .search-box svg {
+    left: 9px;
+  }
+
+  .search-input {
+    padding-left: 30px;
+    font-size: 0.76rem;
   }
 }
 

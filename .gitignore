@@ -230,3 +230,7 @@ data/raw/*
 # Garante o versionamento da base histórica congelada (2003–2025)
 !data/historico_2003_2025.json
 
+# Dependências e artefatos locais do build de frontend (esbuild)
+node_modules/
+
+

@@ -11,11 +11,12 @@ exporta o arquivo limpo para `docs/data/spfc_pontos_corridos.json`.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
 from typing import Any
+import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
@@ -45,6 +46,10 @@ HISTORICO_PATH = BASE_DIR / "data" / "historico_2003_2025.json"
 API_INCREMENTAL_PATH = BASE_DIR / "data" / "jogos_api_brasileirao.json"
 OUTPUT_PATH = BASE_DIR / "docs" / "data" / "spfc_pontos_corridos.json"
 META_PATH = BASE_DIR / "docs" / "data" / "meta.json"
+SITEMAP_PATH = BASE_DIR / "docs" / "sitemap.xml"
+SITEMAP_NS = "http://www.sitemaps.org/schemas/sitemap/0.9"
+SITEMAP_URL_PADRAO = "https://dadostricolor.live/"
+SITEMAP_CHANGEFREQ = "daily"
 
 try:
     BRT = ZoneInfo("America/Sao_Paulo")
@@ -1086,6 +1091,73 @@ def exibir_resumo(
     print("=" * 64)
 
 
+def atualizar_sitemap_xml(
+    caminho_sitemap: Path = SITEMAP_PATH,
+    data_atual: date | None = None,
+    changefreq: str = SITEMAP_CHANGEFREQ,
+) -> bool:
+    """
+    Atualiza `docs/sitemap.xml` ao final do processamento do ETL:
+    - Define `<changefreq>` como `daily` (em vez de `weekly`).
+    - Atualiza `<lastmod>` com a data atual da execução em formato ISO (`YYYY-MM-DD`, BRT).
+
+    Usa gravação atômica (`.tmp` + `os.replace`) e preserva entradas `<url>` existentes.
+    Retorna `True` quando o arquivo é atualizado em disco e `False` se já estiver idêntico.
+    """
+    data_iso = (data_atual or datetime.now(BRT).date()).isoformat()
+    ns_tag = f"{{{SITEMAP_NS}}}"
+    ET.register_namespace("", SITEMAP_NS)
+
+    if caminho_sitemap.exists():
+        conteudo_atual = caminho_sitemap.read_text(encoding="utf-8")
+        root = ET.fromstring(conteudo_atual)
+    else:
+        conteudo_atual = ""
+        root = ET.Element(f"{ns_tag}urlset")
+
+    urls = root.findall(f"{ns_tag}url")
+    if not urls:
+        url_el = ET.SubElement(root, f"{ns_tag}url")
+        loc_el = ET.SubElement(url_el, f"{ns_tag}loc")
+        loc_el.text = SITEMAP_URL_PADRAO
+        lastmod_el = ET.SubElement(url_el, f"{ns_tag}lastmod")
+        lastmod_el.text = data_iso
+        freq_el = ET.SubElement(url_el, f"{ns_tag}changefreq")
+        freq_el.text = changefreq
+        prio_el = ET.SubElement(url_el, f"{ns_tag}priority")
+        prio_el.text = "1.0"
+    else:
+        for url_el in urls:
+            lastmod_el = url_el.find(f"{ns_tag}lastmod")
+            if lastmod_el is None:
+                lastmod_el = ET.SubElement(url_el, f"{ns_tag}lastmod")
+            lastmod_el.text = data_iso
+
+            freq_el = url_el.find(f"{ns_tag}changefreq")
+            if freq_el is None:
+                freq_el = ET.SubElement(url_el, f"{ns_tag}changefreq")
+            freq_el.text = changefreq
+
+    ET.indent(root, space="  ", level=0)
+    xml_corpo = ET.tostring(root, encoding="unicode")
+    novo_conteudo = f'<?xml version="1.0" encoding="UTF-8"?>\n{xml_corpo}\n'
+
+    if conteudo_atual == novo_conteudo:
+        return False
+
+    caminho_sitemap.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = caminho_sitemap.with_suffix(caminho_sitemap.suffix + ".tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8", newline="\n") as arquivo:
+            arquivo.write(novo_conteudo)
+        os.replace(tmp_path, caminho_sitemap)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+
+    return True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="ETL histórico e merge incremental do Dados Tricolor."
@@ -1117,7 +1189,10 @@ def main() -> None:
         historico_payload = montar_dataset()
         payload, stats_merge = sincronizar_producao_com_historico(historico_payload)
 
+    sitemap_atualizado = atualizar_sitemap_xml()
     exibir_resumo(payload, stats_merge=stats_merge)
+    status_sitemap = "atualizado" if sitemap_atualizado else "já atualizado"
+    print(f"Sitemap SEO:       {SITEMAP_PATH} ({status_sitemap} · changefreq={SITEMAP_CHANGEFREQ})")
 
 
 if __name__ == "__main__":

@@ -5,7 +5,11 @@
   "description": "Painel estático Dados Tricolor (SPFC-Analytics) — ES Modules e testes unitários de frontend",
   "type": "module",
   "scripts": {
+    "build": "node scripts/build.mjs",
     "test": "node --test \"tests/frontend/*.test.js\""
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
   },
   "engines": {
     "node": ">=20.0.0"

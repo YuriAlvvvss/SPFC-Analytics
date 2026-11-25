@@ -1874,3 +1874,104 @@ def test_integracao_hibrida_api_e_espn_sem_regressao(
         assert reg_sanitizado["gols"] is None
         assert all(reg_sanitizado[c] is None for c in CAMPOS_CARTOES)
         assert espn_mod.partida_tem_detalhes(reg_sanitizado) is False
+
+
+def test_sitemap_xml_valido_daily_e_iso() -> None:
+    """Valida que `docs/sitemap.xml` existe, está em UTF-8 limpo, usa `daily` e `<lastmod>` ISO."""
+    import xml.etree.ElementTree as ET
+
+    sitemap_path = REPO_ROOT / "docs" / "sitemap.xml"
+    assert sitemap_path.exists() and sitemap_path.is_file(), f"Sitemap ausente: {sitemap_path}"
+
+    raw = sitemap_path.read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf"), "docs/sitemap.xml não deve conter BOM UTF-8."
+    texto = raw.decode("utf-8")
+
+    ns = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
+    root = ET.fromstring(texto)
+    assert root.tag == f"{ns}urlset", f"Tag raiz inesperada em sitemap.xml: {root.tag}"
+
+    urls = root.findall(f"{ns}url")
+    assert len(urls) >= 1, "docs/sitemap.xml deve declarar ao menos uma entrada <url>."
+
+    locs = [u.findtext(f"{ns}loc") for u in urls]
+    assert "https://dadostricolor.live/" in locs, f"URL principal ausente em sitemap.xml: {locs}"
+
+    for url_el in urls:
+        changefreq = url_el.findtext(f"{ns}changefreq")
+        lastmod = url_el.findtext(f"{ns}lastmod")
+        assert changefreq == "daily", f"<changefreq> esperado 'daily', obtido {changefreq!r}"
+        assert lastmod is not None and RE_DATA_ISO.fullmatch(lastmod), (
+            f"<lastmod> fora do formato ISO YYYY-MM-DD: {lastmod!r}"
+        )
+        date.fromisoformat(lastmod)
+
+
+def test_atualizar_sitemap_xml_etl_idempotente() -> None:
+    """Valida a rotina `atualizar_sitemap_xml` do ETL (weekly -> daily, ISO date e idempotência)."""
+    import tempfile
+    import xml.etree.ElementTree as ET
+
+    _, etl_mod = _importar_modulos_etl()
+    ns = f"{{{etl_mod.SITEMAP_NS}}}"
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_sitemap = Path(tmp_dir) / "sitemap.xml"
+        tmp_sitemap.write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+            "  <url>\n"
+            "    <loc>https://dadostricolor.live/</loc>\n"
+            "    <lastmod>2026-01-10</lastmod>\n"
+            "    <changefreq>weekly</changefreq>\n"
+            "    <priority>1.0</priority>\n"
+            "  </url>\n"
+            "</urlset>\n",
+            encoding="utf-8",
+        )
+
+        # 1. Atualiza weekly -> daily e lastmod para data alvo
+        alterado_1 = etl_mod.atualizar_sitemap_xml(
+            caminho_sitemap=tmp_sitemap,
+            data_atual=date(2026, 11, 24),
+        )
+        assert alterado_1 is True
+        root_1 = ET.fromstring(tmp_sitemap.read_text(encoding="utf-8"))
+        url_1 = root_1.find(f"{ns}url")
+        assert url_1 is not None
+        assert url_1.findtext(f"{ns}loc") == "https://dadostricolor.live/"
+        assert url_1.findtext(f"{ns}lastmod") == "2026-11-24"
+        assert url_1.findtext(f"{ns}changefreq") == "daily"
+        assert url_1.findtext(f"{ns}priority") == "1.0"
+
+        # 2. Reexecução no mesmo dia é idempotente (não reescreve o arquivo)
+        bytes_antes = tmp_sitemap.read_bytes()
+        alterado_2 = etl_mod.atualizar_sitemap_xml(
+            caminho_sitemap=tmp_sitemap,
+            data_atual=date(2026, 11, 24),
+        )
+        assert alterado_2 is False
+        assert tmp_sitemap.read_bytes() == bytes_antes
+
+        # 3. Nova data atualiza apenas <lastmod>
+        alterado_3 = etl_mod.atualizar_sitemap_xml(
+            caminho_sitemap=tmp_sitemap,
+            data_atual=date(2026, 11, 25),
+        )
+        assert alterado_3 is True
+        root_3 = ET.fromstring(tmp_sitemap.read_text(encoding="utf-8"))
+        assert root_3.findtext(f"{ns}url/{ns}lastmod") == "2026-11-25"
+        assert root_3.findtext(f"{ns}url/{ns}changefreq") == "daily"
+
+        # 4. Criação automática quando o arquivo ainda não existe
+        novo_sitemap = Path(tmp_dir) / "sub" / "sitemap.xml"
+        alterado_4 = etl_mod.atualizar_sitemap_xml(
+            caminho_sitemap=novo_sitemap,
+            data_atual=date(2026, 11, 26),
+        )
+        assert alterado_4 is True and novo_sitemap.exists()
+        root_4 = ET.fromstring(novo_sitemap.read_text(encoding="utf-8"))
+        assert root_4.findtext(f"{ns}url/{ns}loc") == "https://dadostricolor.live/"
+        assert root_4.findtext(f"{ns}url/{ns}lastmod") == "2026-11-26"
+        assert root_4.findtext(f"{ns}url/{ns}changefreq") == "daily"
+        assert root_4.findtext(f"{ns}url/{ns}priority") == "1.0"

@@ -78,13 +78,14 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -- \
             docs/data/spfc_pontos_corridos.json \
-            docs/data/meta.json
+            docs/data/meta.json \
+            docs/sitemap.xml
           git commit -m "chore(data): atualiza jogos SPFC via ESPN"
           git pull --rebase origin main
           git push origin main
 
   build:
-    name: Preparar artefato do GitHub Pages
+    name: Preparar artefato otimizado do GitHub Pages
     needs: atualizar-dados
     if: needs.atualizar-dados.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
@@ -99,13 +100,24 @@ jobs:
         with:
           ref: main
 
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Instalar esbuild
+        run: npm install --no-audit --no-fund
+
+      - name: Gerar build otimizado (minificação + cache-busting)
+        run: npm run build
+
       - name: Configurar GitHub Pages
         uses: actions/configure-pages@v5
 
-      - name: Empacotar artefato do Pages (docs/)
+      - name: Empacotar artefato do Pages (dist/)
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./docs
+          path: ./dist
 
   deploy:
     name: Deploy no GitHub Pages
