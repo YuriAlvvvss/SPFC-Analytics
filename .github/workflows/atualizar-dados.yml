@@ -57,10 +57,45 @@ jobs:
         continue-on-error: true
         run: python etl/atualizar_temporada.py
 
-      - name: Registrar aviso se o enriquecimento via ESPN falhou
+      - name: Registrar alerta de falha no enriquecimento via ESPN
         if: steps.espn_enrichment.outcome == 'failure'
+        env:
+          WORKFLOW_NAME: ${{ github.workflow }}
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          echo "::warning::A consulta complementar à API ESPN falhou nesta execução. O pipeline seguirá com os dados da football-data.org e tentará enriquecer novamente na próxima execução."
+          TIMESTAMP_BRT="$(TZ='America/Sao_Paulo' date +'%Y-%m-%d %H:%M:%S %Z (UTC%z)')"
+          TIMESTAMP_UTC="$(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+
+          echo "::warning title=Falha no enriquecimento via API ESPN::etl/atualizar_temporada.py falhou em ${TIMESTAMP_BRT}. O pipeline seguiu com football-data.org (continue-on-error: true); consulte o Job Summary para detalhes e passos de investigação."
+
+          {
+            printf '## ⚠️ Alerta: Falha no enriquecimento via API ESPN\n\n'
+            printf 'A etapa `espn_enrichment` (`python etl/atualizar_temporada.py`) falhou nesta execução e foi tolerada via `continue-on-error: true` para preservar a continuidade do pipeline diário.\n\n'
+            printf '### Contexto da Ocorrência\n'
+            printf '| Campo | Valor |\n'
+            printf '| --- | --- |\n'
+            printf '| **Data/Hora (BRT)** | `%s` |\n' "$TIMESTAMP_BRT"
+            printf '| **Data/Hora (UTC)** | `%s` |\n' "$TIMESTAMP_UTC"
+            printf '| **Workflow** | %s |\n' "$WORKFLOW_NAME"
+            printf '| **Evento** | `%s` |\n' "$EVENT_NAME"
+            printf '| **Execução** | [#%s (tentativa %s)](%s) |\n' "$RUN_ID" "$RUN_ATTEMPT" "$RUN_URL"
+            printf '| **Etapa / Script** | `espn_enrichment` → `etl/atualizar_temporada.py` |\n\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          cat <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          ### Impacto
+          - **Pipeline principal preservado:** a ingestão de placares e próximo jogo via `football-data.org`, o merge determinístico (`etl/processar_dados.py`), o Quality Gate (`pytest`) e o deploy continuam normalmente.
+          - **Enriquecimento adiado:** detalhes da temporada atual (**gols/artilheiros, cartões/expulsões, formação e estatísticas técnicas** via API pública da ESPN `bra.1`) não foram atualizados nesta execução.
+          - **Atenção à recorrência:** se este alerta se repetir em execuções consecutivas, partidas recentes permanecerão sem detalhamento fino até o diagnóstico.
+
+          ### Como Investigar
+          1. Inspecione os logs da etapa **"Enriquecer temporada atual via API ESPN (gols, cartões e estatísticas)"** nesta execução procurando timeouts, erros HTTP (`403`/`429`/`5xx`), regressão de contagem ou alterações de payload da ESPN (`site.api.espn.com/apis/site/v2/sports/soccer/bra.1`).
+          2. Reproduza localmente com `python etl/atualizar_temporada.py` (ou `python etl/atualizar_temporada.py --force-refresh` para ignorar o cache local) e valide os dicionários `MAPA_TIMES`, `MAPA_ATLETAS` e `MAPA_ARENAS`.
+          3. Em caso de instabilidade transitória já normalizada, aguarde a próxima execução agendada (`03h00` / `12h00` BRT) ou acione manualmente o workflow **Atualizar Jogos SPFC (ESPN — Manual)** (`.github/workflows/atualizar-jogos.yml`).
+          EOF
 
       - name: Executar ETL e merge determinístico
         run: python etl/processar_dados.py

@@ -12,7 +12,7 @@
 
 [![GitHub Pages](https://img.shields.io/badge/Deploy-GitHub%20Pages-111315?style=for-the-badge&logo=github)](https://dadostricolor.live/)
 [![Python](https://img.shields.io/badge/Python-3.12+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
-[![Pandas](https://img.shields.io/badge/Pandas-ETL-150458?style=for-the-badge&logo=pandas&logoColor=white)](https://pandas.pydata.org/)
+[![Pandas (Opcional — ETL Histórico)](https://img.shields.io/badge/Pandas-ETL%20Opcional-150458?style=for-the-badge&logo=pandas&logoColor=white)](https://pandas.pydata.org/)
 [![pytest](https://img.shields.io/badge/pytest-Data%20Quality-0A9EDC?style=for-the-badge&logo=pytest&logoColor=white)](tests/test_data_quality.py)
 [![Chart.js](https://img.shields.io/badge/Chart.js-4-D5001C?style=for-the-badge&logo=chartdotjs&logoColor=white)](https://www.chartjs.org/)
 
@@ -29,7 +29,7 @@
 O **Dados Tricolor** é uma aplicação web **100% estática** — construída em **HTML5, CSS3, JavaScript puro e Chart.js 4** e publicada no GitHub Pages em [dadostricolor.live](https://dadostricolor.live/) — focada na trajetória do **São Paulo FC** no Campeonato Brasileiro Série A na era dos pontos corridos (**2003–Atual**).
 
 O projeto opera com uma **arquitetura híbrida e um pipeline 100% autônomo protegido por testes automatizados**:
-- **Base histórica congelada (2003–2025):** estruturada em **Python + Pandas** a partir dos CSVs públicos do Campeonato Brasileiro (Kaggle) e versionada em `data/historico_2003_2025.json`.
+- **Base histórica congelada (2003–2025):** estruturada a partir dos CSVs públicos do Campeonato Brasileiro (Kaggle) e versionada em `data/historico_2003_2025.json`. O `pandas` é uma dependência **opcional**, utilizada exclusivamente para o reprocessamento histórico desses CSVs brutos — o pipeline operacional diário e os testes dependem apenas de `requests` e `pytest` (`requirements.txt`).
 - **Pipeline autônomo diário unificado (2026+):** executado automaticamente todos os dias às **03h00 e 12h00 BRT** no **GitHub Actions** ([`atualizar-dados.yml`](.github/workflows/atualizar-dados.yml)), consulta a API **`football-data.org` (v4 / `BSA`)** via `etl/atualizar_jogos_api.py` (jogos encerrados em `data/jogos_api_brasileirao.json` e próximo confronto em `docs/data/proximo_jogo.json`), enriquece imediatamente a temporada atual com gols, cartões/expulsões, formação e estatísticas via API pública da **ESPN (`bra.1`)** em `etl/atualizar_temporada.py` (com tolerância a falhas transitórias), realiza o merge determinístico em `etl/processar_dados.py` e atualiza `docs/data/spfc_pontos_corridos.json` e `docs/data/meta.json` em um único commit e deploy.
 - **Quality Gate contínuo:** toda atualização automatizada ou push/PR na `main` passa pela suíte `pytest` em `tests/test_data_quality.py` antes de qualquer commit automático ou deploy no GitHub Pages.
 
@@ -141,7 +141,7 @@ flowchart LR
 - **Separação de Workflows (CI/CD):**
   - **[`.github/workflows/data-quality.yml`](.github/workflows/data-quality.yml) (CI/CD para pushes manuais e Pull Requests):** acionado em `push` e `pull_request` na `main` (e `workflow_dispatch`), encadeando `data-quality` (`pytest -v`) → `build` (empacota `./docs`, apenas em `push` na `main`) → `deploy` (publica no ambiente `github-pages`, apenas em `push` na `main`).
   - **[`.github/workflows/atualizar-dados.yml`](.github/workflows/atualizar-dados.yml) (Pipeline Autônomo Agendado + ESPN + Deploy):** acionado diariamente às **03h00 e 12h00 BRT** via `cron: "0 6,15 * * *"` e sob demanda via `workflow_dispatch`, em 3 jobs encadeados:
-    1. **`update-data`:** valida o Secret `FOOTBALL_DATA_API_KEY` (*fail-fast*), executa `python etl/atualizar_jogos_api.py`, enriquece a temporada atual via `python etl/atualizar_temporada.py` (com tolerância a falhas transitórias da ESPN para nunca travar a atualização do placar/próximo jogo), roda `python etl/processar_dados.py`, aplica o Quality Gate (`pytest -v`), verifica alterações reais nos 4 JSONs de dados (`data/jogos_api_brasileirao.json`, `docs/data/spfc_pontos_corridos.json`, `docs/data/meta.json` e `docs/data/proximo_jogo.json`) e só executa commit, `git pull --rebase` e push para `main` quando `has_changes == 'true'`.
+    1. **`update-data`:** valida o Secret `FOOTBALL_DATA_API_KEY` (*fail-fast*), executa `python etl/atualizar_jogos_api.py`, enriquece a temporada atual via `python etl/atualizar_temporada.py` (com `continue-on-error: true` e alerta estruturado em `$GITHUB_STEP_SUMMARY` em caso de falha, evitando falhas silenciosas sem travar a atualização do placar/próximo jogo), roda `python etl/processar_dados.py`, aplica o Quality Gate (`pytest -v`), verifica alterações reais nos 4 JSONs de dados (`data/jogos_api_brasileirao.json`, `docs/data/spfc_pontos_corridos.json`, `docs/data/meta.json` e `docs/data/proximo_jogo.json`) e só executa commit, `git pull --rebase` e push para `main` quando `has_changes == 'true'`.
     2. **`build`** (`needs: update-data`, `if: has_changes == 'true'`): faz checkout da `main` atualizada e empacota `./docs` como artefato do GitHub Pages.
     3. **`deploy`** (`needs: build`): publica o artefato validado no ambiente `github-pages` (`dadostricolor.live`).
   - **[`.github/workflows/atualizar-jogos.yml`](.github/workflows/atualizar-jogos.yml) (Sincronização Manual — ESPN + Deploy):** mantido apenas sob demanda (`workflow_dispatch`, com opção `force_refresh`) para reprocessamento manual da ESPN sem depender da `football-data.org`; executa `etl/atualizar_temporada.py`, sincroniza via `etl/processar_dados.py`, valida com `pytest -v`, commita se houver alteração real e executa `build` + `deploy` no GitHub Pages.
@@ -153,7 +153,7 @@ flowchart LR
 - Filtra partidas do São Paulo FC, normaliza fuso horário (`UTC → BRT`) e nomes de clubes, grava `data/jogos_api_brasileirao.json` (apenas `FINISHED` válidos) e seleciona o próximo jogo futuro (`status in ("TIMED", "SCHEDULED")`) em `docs/data/proximo_jogo.json`.
 
 #### 2. ETL Histórico e Merge Determinístico ([`etl/processar_dados.py`](etl/processar_dados.py))
-Processa os CSVs originais do Kaggle (`2003–2025`) ou utiliza automaticamente a base histórica congelada (`data/historico_2003_2025.json`) quando `pandas` ou `data/raw/*.csv` não estão presentes, fazendo o merge determinístico com `data/jogos_api_brasileirao.json` (continuando 100% funcional offline quando o arquivo da API não existe):
+Processa os CSVs originais do Kaggle (`2003–2025`, único fluxo que exige a dependência **opcional** `pandas`) ou utiliza automaticamente a base histórica congelada (`data/historico_2003_2025.json`) quando `pandas` ou `data/raw/*.csv` não estão presentes, fazendo o merge determinístico com `data/jogos_api_brasileirao.json` apenas com as dependências padrão de `requirements.txt` (continuando 100% funcional offline quando o arquivo da API não existe):
 - **Patch documentado de datas (`CORRECOES_DATAS_POR_ID`):** corrige no próprio pipeline duas anomalias de datas duplicadas da fonte original do Kaggle, **sem alterar os arquivos brutos em `data/raw/`**:
   - ID `2417` (2008 R11, Casa vs Palmeiras): `2008-07-06` → `2008-07-13`.
   - ID `3130` (2010 R5, Fora vs Guarani): `2010-05-23` → `2010-05-30`.
@@ -224,7 +224,7 @@ SPFC-Analytics/
 ├── .gitignore
 ├── package.json                         # Metadados ESM (`"type": "module"`) e script `npm test` (zero dependências)
 ├── README.md
-└── requirements.txt                     # Dependências Python (requests e pytest)
+└── requirements.txt                     # Dependências do pipeline operacional diário (requests e pytest; pandas é opcional)
 ```
 
 ---
@@ -233,10 +233,23 @@ SPFC-Analytics/
 
 ### 1. Clonar o repositório e instalar dependências
 
+O arquivo [`requirements.txt`](requirements.txt) contém **apenas `requests` e `pytest`**, cobrindo integralmente o **pipeline operacional diário** (coleta via APIs `football-data.org` e ESPN, merge determinístico sobre a base histórica congelada e validação com `pytest`). O **`pandas`** é uma dependência **opcional**, utilizada **exclusivamente** para o reprocessamento histórico da base a partir dos CSVs brutos do Kaggle (`data/raw/*.csv`).
+
 ```bash
 git clone https://github.com/YuriAlvvvss/SPFC-Analytics.git
 cd SPFC-Analytics
+```
+
+**Uso padrão (pipeline operacional diário, merge offline e testes — apenas `requests` e `pytest`):**
+
+```bash
 pip install -r requirements.txt
+```
+
+**Reprocessamento histórico da base do Kaggle (dependências padrão + `pandas` opcional):**
+
+```bash
+pip install -r requirements.txt pandas
 ```
 
 ### 2. Execução 100% Offline (ETL + Quality Gate + Front-end)
@@ -305,13 +318,13 @@ python3 etl/atualizar_temporada.py --force-refresh
 python3 etl/processar_dados.py --patch-json
 ```
 
-- **Reprocessar toda a base histórica a partir dos CSVs do Kaggle:**
+- **Reprocessar toda a base histórica a partir dos CSVs do Kaggle (único cenário que exige a dependência opcional `pandas`):**
   1. Baixe os 4 CSVs do dataset do Kaggle e coloque-os em `data/raw/`:
      - `campeonato-brasileiro-full.csv`
      - `campeonato-brasileiro-cartoes.csv`
      - `campeonato-brasileiro-estatisticas-full.csv`
      - `campeonato-brasileiro-gols.csv`
-  2. Instale o `pandas` e execute o pipeline histórico:
+  2. Instale as dependências padrão junto com o `pandas` opcional e execute o pipeline histórico:
 
 ```bash
 pip install -r requirements.txt pandas
