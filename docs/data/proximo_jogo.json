@@ -1,13 +1,13 @@
 {
-  "atualizado_em": "2026-11-24T14:16:14-03:00",
+  "atualizado_em": "2026-11-26T23:08:17-03:00",
   "tem_proximo_jogo": true,
   "proximo_jogo": {
-    "data": "2026-11-26",
-    "hora": "20:00",
+    "data": "2026-12-02",
+    "hora": "21:30",
     "horario_definido": true,
-    "adversario": "Remo",
-    "mando": "Casa",
-    "rodada": 37,
+    "adversario": "Athletico-PR",
+    "mando": "Fora",
+    "rodada": 38,
     "temporada": 2026,
     "competicao": "Brasileirão Série A",
     "status": "TIMED"

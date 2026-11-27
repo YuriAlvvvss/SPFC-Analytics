@@ -4,7 +4,7 @@
     "competicao": "Campeonato Brasileiro Série A — Era dos Pontos Corridos",
     "temporada_inicio": 2003,
     "temporada_fim": 2026,
-    "total_partidas": 930,
+    "total_partidas": 931,
     "temporadas_com_cartoes": [
       2014,
       2015,
@@ -51,7 +51,7 @@
     ],
     "fonte_cartoes": "campeonato-brasileiro-cartoes.csv (2014–2024), campeonato-brasileiro-estatisticas-full.csv (2025) e API pública ESPN (2026)",
     "fonte_gols": "campeonato-brasileiro-gols.csv (2014–2025) e API pública ESPN (2026)",
-    "gerado_em": "2026-11-24T20:34:14Z"
+    "gerado_em": "2026-11-27T02:08:19Z"
   },
   "partidas": [
     {
@@ -32902,6 +32902,56 @@
       "faltas": 19,
       "escanteios": 3,
       "impedimentos": 3
+    },
+    {
+      "id": 401841329,
+      "temporada": 2026,
+      "rodada": 37,
+      "data": "2026-11-26",
+      "hora": "20:00",
+      "mando": "Casa",
+      "adversario": "Remo",
+      "adversario_estado": "PA",
+      "arena": "MorumBIS, São Paulo",
+      "gols_pro": 3,
+      "gols_contra": 1,
+      "saldo_gols": 2,
+      "resultado": "V",
+      "pontos": 3,
+      "tecnico_spfc": null,
+      "formacao_spfc": "4-2-3-1",
+      "cartoes_amarelos": 1,
+      "cartoes_vermelhos": 0,
+      "cartoes_amarelos_adversario": 3,
+      "cartoes_vermelhos_adversario": 0,
+      "gols": [
+        {
+          "jogador": "Jonathan Calleri",
+          "minuto": "39",
+          "tipo": "Normal",
+          "gol_contra": false
+        },
+        {
+          "jogador": "Ryan Francisco",
+          "minuto": "87",
+          "tipo": "Normal",
+          "gol_contra": false
+        },
+        {
+          "jogador": "Jonathan Calleri",
+          "minuto": "90+5",
+          "tipo": "Normal",
+          "gol_contra": false
+        }
+      ],
+      "chutes": 9,
+      "chutes_no_alvo": 4,
+      "posse_de_bola": 62,
+      "passes": 623,
+      "precisao_passes": 89,
+      "faltas": 18,
+      "escanteios": 4,
+      "impedimentos": 5
     }
   ]
 }

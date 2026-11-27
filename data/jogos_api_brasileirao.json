@@ -3,11 +3,11 @@
     "fonte": "football-data.org (v4 / BSA)",
     "clube": "São Paulo FC",
     "competicao": "Brasileirão Série A",
-    "atualizado_em": "2026-11-24T14:16:14-03:00",
+    "atualizado_em": "2026-11-26T23:08:17-03:00",
     "temporadas": [
       2026
     ],
-    "total_partidas": 36
+    "total_partidas": 37
   },
   "partidas": [
     {
@@ -1110,6 +1110,37 @@
       "saldo_gols": 0,
       "resultado": "E",
       "pontos": 1,
+      "tecnico_spfc": null,
+      "formacao_spfc": null,
+      "cartoes_amarelos": null,
+      "cartoes_vermelhos": null,
+      "cartoes_amarelos_adversario": null,
+      "cartoes_vermelhos_adversario": null,
+      "gols": null,
+      "chutes": null,
+      "chutes_no_alvo": null,
+      "posse_de_bola": null,
+      "passes": null,
+      "precisao_passes": null,
+      "faltas": null,
+      "escanteios": null,
+      "impedimentos": null
+    },
+    {
+      "id": 555108,
+      "temporada": 2026,
+      "rodada": 37,
+      "data": "2026-11-26",
+      "hora": "20:00",
+      "mando": "Casa",
+      "adversario": "Remo",
+      "adversario_estado": "PA",
+      "arena": "MorumBIS, São Paulo",
+      "gols_pro": 3,
+      "gols_contra": 1,
+      "saldo_gols": 2,
+      "resultado": "V",
+      "pontos": 3,
       "tecnico_spfc": null,
       "formacao_spfc": null,
       "cartoes_amarelos": null,
